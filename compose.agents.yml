@@ -36,6 +36,13 @@ services:
       CC_BRIDGE_CONFIG_PATH: ${HERMES_HOMES_DIR:-/opt/hermes-homes}/bridge-config.json
       CC_API_BASE: ${PUBLIC_BASE_URL:-http://localhost:8080}/api
       CC_HERMES_IMAGE: ${CC_HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+      # The agents' network, outgoing filter and extra MCP servers (see
+      # api/src/agents/agent-network.ts). Unset keeps the computer's own network.
+      CC_AGENT_NETWORK: ${CC_AGENT_NETWORK:-}
+      CC_AGENT_PROXY: ${CC_AGENT_PROXY:-}
+      CC_AGENT_NO_PROXY: ${CC_AGENT_NO_PROXY:-}
+      CC_AGENT_API_BASE: ${CC_AGENT_API_BASE:-}
+      CC_AGENT_MCP_SERVERS: ${CC_AGENT_MCP_SERVERS:-}
       CC_OPENCLAW_IMAGE: ${CC_OPENCLAW_IMAGE:-alpine/openclaw:latest}
       # Where the equip step finds the skill docs + MCP stdio script to install
       # into each new agent. These MUST be absolute HOST paths: Hermes equip
@@ -60,6 +67,13 @@ services:
 
   worker:
     environment:
+      # The agents' network, outgoing filter and extra MCP servers (see
+      # api/src/agents/agent-network.ts). Unset keeps the computer's own network.
+      CC_AGENT_NETWORK: ${CC_AGENT_NETWORK:-}
+      CC_AGENT_PROXY: ${CC_AGENT_PROXY:-}
+      CC_AGENT_NO_PROXY: ${CC_AGENT_NO_PROXY:-}
+      CC_AGENT_API_BASE: ${CC_AGENT_API_BASE:-}
+      CC_AGENT_MCP_SERVERS: ${CC_AGENT_MCP_SERVERS:-}
       HERMES_HOMES_DIR: ${HERMES_HOMES_DIR:-/opt/hermes-homes}
       CC_BRIDGE_CONFIG_PATH: ${HERMES_HOMES_DIR:-/opt/hermes-homes}/bridge-config.json
     volumes:
@@ -79,6 +93,13 @@ services:
       CC_API_BASE: ${PUBLIC_BASE_URL:-http://localhost:8080}/api
       HERMES_HOMES_DIR: ${HERMES_HOMES_DIR:-/opt/hermes-homes}
       CC_HERMES_IMAGE: ${CC_HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+      # The agents' network, outgoing filter and extra MCP servers (see
+      # api/src/agents/agent-network.ts). Unset keeps the computer's own network.
+      CC_AGENT_NETWORK: ${CC_AGENT_NETWORK:-}
+      CC_AGENT_PROXY: ${CC_AGENT_PROXY:-}
+      CC_AGENT_NO_PROXY: ${CC_AGENT_NO_PROXY:-}
+      CC_AGENT_API_BASE: ${CC_AGENT_API_BASE:-}
+      CC_AGENT_MCP_SERVERS: ${CC_AGENT_MCP_SERVERS:-}
       CC_OPENCLAW_IMAGE: ${CC_OPENCLAW_IMAGE:-alpine/openclaw:latest}
       # The bridge is what actually spawns the per-turn agent containers, so it
       # needs the same shared-workspace host path the api uses. Empty = feature
