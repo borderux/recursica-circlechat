@@ -1,0 +1,45 @@
+# Weekly: rebase Border UX's branch onto the original CircleChat, run the tests, and open a pull
+# request on this fork for a person to review. Posts the link to Slack when the repository secret
+# SLACK_WEBHOOK_URL is set.
+name: Upstream sync
+
+on:
+  schedule: [{ cron: "0 13 * * 1" }]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: border/local-fixes, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Rebase onto the original
+        id: rebase
+        run: |
+          git config user.name "upstream-sync"; git config user.email "upstream-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/tashfeenahmed/circlechat
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git checkout -b "upstream-sync/$(date -u +%Y-%m-%d)"
+          git rebase upstream/main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Tests
+        if: steps.rebase.outputs.changed == 'true'
+        working-directory: api
+        run: npm ci && npx tsc --noEmit -p . && npx vitest run
+      - name: Pull request
+        if: steps.rebase.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          branch="$(git branch --show-current)"
+          git push --force origin "$branch"
+          url="$(gh pr create --base border/local-fixes --head "$branch" --title "Upstream sync: $(date -u +%Y-%m-%d)" --body "Border UX's branch rebased onto the original CircleChat. Tests passed. Merging updates every stack within the hour.")"
+          [ -n "$SLACK_WEBHOOK_URL" ] && curl -fsS -X POST -H 'content-type: application/json' --data "{\"text\":\"CircleChat upstream changes are ready for review: $url\"}" "$SLACK_WEBHOOK_URL" || true

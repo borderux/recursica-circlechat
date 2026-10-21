@@ -20,7 +20,7 @@ const AGENT_API_BASE = process.env.CC_AGENT_API_BASE ?? API_BASE;
 function agentNetworkArgs(env = process.env) {
   const network = (env.CC_AGENT_NETWORK ?? "").trim();
   if (!network || network === "host") return ["--network=host"];
-  const args = ["--network", network];
+  const args = ["--network", network, "--dns", "127.0.0.1"];
   const proxy = (env.CC_AGENT_PROXY ?? "").trim();
   if (proxy) {
     const noProxy = (env.CC_AGENT_NO_PROXY ?? "").trim();
