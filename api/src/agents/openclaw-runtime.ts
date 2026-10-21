@@ -3,6 +3,8 @@
 // runtime is supported — the host-installed openclaw CLI is not a deployment
 // target for circlechat.
 
+import { agentNetworkArgs } from "./agent-network.js";
+
 export const OPENCLAW_IMAGE =
   process.env.CC_OPENCLAW_IMAGE ?? "alpine/openclaw:latest";
 
@@ -35,7 +37,7 @@ export function buildOpenClawCommand(
       "-i",
       "--user",
       "0:0",
-      "--network=host",
+      ...agentNetworkArgs(),
       "-v",
       `${openclawHome}:${CONTAINER_OPENCLAW_HOME}`,
       "--entrypoint",

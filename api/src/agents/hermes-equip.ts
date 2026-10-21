@@ -51,7 +51,7 @@ const MCP_SCRIPT =
 
 // What CircleChat's MCP server knows the API base as. Hermes only passes argv
 // strings, not env, to stdio servers — so we bake this in.
-const CC_API_BASE = process.env.CC_API_BASE ?? "http://localhost:3300/api";
+const CC_API_BASE = process.env.CC_AGENT_API_BASE ?? process.env.CC_API_BASE ?? "http://localhost:3300/api";
 
 // Copy the baked `circlechat` skill into HERMES_HOME/skills/circlechat/ and
 // register the circlechat MCP server in that home's config.

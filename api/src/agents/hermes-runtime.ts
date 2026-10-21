@@ -2,6 +2,8 @@
 // Docker container pulled from Docker Hub. Both paths must accept the same
 // per-agent HERMES_HOME and produce identical on-disk layout.
 
+import { agentNetworkArgs } from "./agent-network.js";
+
 export type HermesRuntime = "host" | "docker";
 
 export const HERMES_RUNTIME: HermesRuntime =
@@ -60,7 +62,7 @@ export function buildHermesCommand(
       // `-i` forwards stdin so interactive prompts (e.g. `hermes mcp add`
       // asking "enable tool? y/N") can be answered from the caller.
       "-i",
-      "--network=host",
+      ...agentNetworkArgs(),
       ...mounts,
       HERMES_IMAGE,
       ...subArgs,

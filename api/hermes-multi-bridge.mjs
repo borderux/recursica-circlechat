@@ -15,6 +15,21 @@ import { join as joinPath } from "node:path";
 const CFG_PATH = process.env.CC_BRIDGE_CONFIG ?? "./bridge-config.json";
 const WSS = process.env.CC_WSS_URL ?? "ws://localhost:3300/agent-socket";
 const API_BASE = process.env.CC_API_BASE ?? "http://localhost:3300/api";
+// The CircleChat address and network for agent containers. See api/src/agents/agent-network.ts.
+const AGENT_API_BASE = process.env.CC_AGENT_API_BASE ?? API_BASE;
+function agentNetworkArgs(env = process.env) {
+  const network = (env.CC_AGENT_NETWORK ?? "").trim();
+  if (!network || network === "host") return ["--network=host"];
+  const args = ["--network", network];
+  const proxy = (env.CC_AGENT_PROXY ?? "").trim();
+  if (proxy) {
+    const noProxy = (env.CC_AGENT_NO_PROXY ?? "").trim();
+    for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) args.push("-e", `${k}=${proxy}`);
+    if (noProxy) for (const k of ["NO_PROXY", "no_proxy"]) args.push("-e", `${k}=${noProxy}`);
+    args.push("-e", "NODE_USE_ENV_PROXY=1");
+  }
+  return args;
+}
 // Observed on the live fishbowl: successful Hermes runs p50 133s / p90 183s,
 // and every "empty/crashed" reply was the 180s SIGTERM. Default well above p90.
 const HERMES_TIMEOUT = Number(process.env.HERMES_TIMEOUT) || 480; // seconds; empty/invalid → default
@@ -176,7 +191,7 @@ function buildHermesSpawn(hermesHome, hermesArgs, envExtras = {}) {
     "run",
     "--rm",
     "-i",
-    "--network=host",
+    ...agentNetworkArgs(),
     // How long the daemon waits after SIGTERM before SIGKILLing the container.
     // Without it a stop is a 10 s guillotine through whatever s6 was draining.
     "--stop-timeout",
@@ -245,7 +260,7 @@ function callHermes(prompt, hermesHome, token, modelOverride) {
     const hermesArgs = ["chat", "-q", prompt, "-Q", "--yolo", "--source", "circlechat"];
     if (modelOverride) hermesArgs.push("-m", modelOverride);
     const envExtras = {
-      CC_API_BASE: API_BASE,
+      CC_API_BASE: AGENT_API_BASE,
       CC_BOT_TOKEN: token,
     };
     const spec = buildHermesSpawn(hermesHome, hermesArgs, envExtras);
@@ -280,11 +295,11 @@ function callOpenClaw(prompt, openclawHome, token) {
       "-i",
       "--user",
       "0:0",
-      "--network=host",
+      ...agentNetworkArgs(),
       "-v",
       `${openclawHome}:${CONTAINER_OPENCLAW_HOME}`,
       "-e",
-      `CC_API_BASE=${API_BASE}`,
+      `CC_API_BASE=${AGENT_API_BASE}`,
       "-e",
       `CC_BOT_TOKEN=${token}`,
       "--entrypoint",
@@ -1269,7 +1284,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     `If your only job this turn is to do actions (no chat reply needed), leave your prose body empty — the actions still run and no "thinking" message posts. Otherwise write a short reply naming the concrete outcomes (e.g. "Created task_xyz, assigned to @ada").`,
     ``,
     `TOOLS (read-only context lookups via your terminal skill — use when you need older context not already in the packet):`,
-    `  Your container exposes CC_API_BASE=${API_BASE} and CC_BOT_TOKEN=<your bot token> as env vars — read from those, never hardcode.`,
+    `  Your container exposes CC_API_BASE=${AGENT_API_BASE} and CC_BOT_TOKEN=<your bot token> as env vars — read from those, never hardcode.`,
     entry.kind === "openclaw" || typeof entry.openclawHome === "string"
       ? `  You have \`curl\` available. Example: curl -s -H "Authorization: Bearer $CC_BOT_TOKEN" "$CC_API_BASE/agent-api/tasks"`
       : `  Your container has python3 but no curl. Use urllib:\n    python3 -c 'import os,urllib.request as u;r=u.Request(f"{os.environ[\\"CC_API_BASE\\"]}/agent-api/tasks",headers={"Authorization":f"Bearer {os.environ[\\"CC_BOT_TOKEN\\"]}"});print(u.urlopen(r).read().decode())'`,
