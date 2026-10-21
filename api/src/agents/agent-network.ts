@@ -26,5 +26,6 @@ export function agentNetworkArgs(env: NodeJS.ProcessEnv = process.env): string[]
 // The CircleChat address an agent container uses. On a closed network, the computer's localhost
 // is out of reach, so the agent uses the api's name on that network instead.
 export function agentApiBase(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CC_AGENT_API_BASE ?? env.CC_API_BASE ?? "http://localhost:3300/api";
+  // Compose passes an unset setting as an empty string, so an empty value counts as unset.
+  return env.CC_AGENT_API_BASE || env.CC_API_BASE || "http://localhost:3300/api";
 }

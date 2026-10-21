@@ -7,7 +7,7 @@ import { skillHasDescription } from "./hermes-equip.js";
 const MCP_SCRIPT =
   process.env.CC_MCP_SCRIPT ??
   pathResolve(process.cwd(), "scripts/circlechat-mcp.mjs");
-const CC_API_BASE = process.env.CC_AGENT_API_BASE ?? process.env.CC_API_BASE ?? "http://localhost:3300/api";
+const CC_API_BASE = process.env.CC_AGENT_API_BASE || process.env.CC_API_BASE || "http://localhost:3300/api";
 const SKILL_TEMPLATE_DIR =
   process.env.CC_SKILL_TEMPLATE ??
   pathResolve(process.cwd(), "templates/circlechat-skill");

@@ -51,7 +51,7 @@ const MCP_SCRIPT =
 
 // What CircleChat's MCP server knows the API base as. Hermes only passes argv
 // strings, not env, to stdio servers — so we bake this in.
-const CC_API_BASE = process.env.CC_AGENT_API_BASE ?? process.env.CC_API_BASE ?? "http://localhost:3300/api";
+const CC_API_BASE = process.env.CC_AGENT_API_BASE || process.env.CC_API_BASE || "http://localhost:3300/api";
 
 // Copy the baked `circlechat` skill into HERMES_HOME/skills/circlechat/ and
 // register the circlechat MCP server in that home's config.
@@ -160,7 +160,7 @@ export async function installCircleChatTooling(params: {
   // config.yaml beside CircleChat's own server.
   try {
     const handle = hermesHome.split(/[\\/]/).filter(Boolean).pop()?.replace(/^\.hermes-/, "") ?? "";
-    const extra = (JSON.parse(process.env.CC_AGENT_MCP_SERVERS ?? "{}") as Record<string, Record<string, unknown>>)[handle];
+    const extra = (JSON.parse(process.env.CC_AGENT_MCP_SERVERS || "{}") as Record<string, Record<string, unknown>>)[handle];
     if (extra && Object.keys(extra).length) {
       const configPath = join(hermesHome, "config.yaml");
       const cfg = (parseYaml(await fs.readFile(configPath, "utf8")) as Record<string, unknown>) ?? {};

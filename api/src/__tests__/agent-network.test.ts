@@ -20,4 +20,8 @@ describe("agentApiBase", () => {
     expect(agentApiBase({ CC_AGENT_API_BASE: "http://api:3300/api", CC_API_BASE: "http://localhost:3300/api" })).toBe("http://api:3300/api");
     expect(agentApiBase({})).toBe("http://localhost:3300/api");
   });
+  it("treats an empty setting from compose as unset", () => {
+    expect(agentApiBase({ CC_AGENT_API_BASE: "", CC_API_BASE: "http://localhost:8080/api" })).toBe("http://localhost:8080/api");
+    expect(agentNetworkArgs({ CC_AGENT_NETWORK: "", CC_AGENT_PROXY: "" })).toEqual(["--network=host"]);
+  });
 });
