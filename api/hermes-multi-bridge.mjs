@@ -16,7 +16,8 @@ const CFG_PATH = process.env.CC_BRIDGE_CONFIG ?? "./bridge-config.json";
 const WSS = process.env.CC_WSS_URL ?? "ws://localhost:3300/agent-socket";
 const API_BASE = process.env.CC_API_BASE ?? "http://localhost:3300/api";
 // The CircleChat address and network for agent containers. See api/src/agents/agent-network.ts.
-const AGENT_API_BASE = process.env.CC_AGENT_API_BASE ?? API_BASE;
+// Compose passes an unset setting as an empty string, so an empty value counts as unset.
+const AGENT_API_BASE = process.env.CC_AGENT_API_BASE || API_BASE;
 function agentNetworkArgs(env = process.env) {
   const network = (env.CC_AGENT_NETWORK ?? "").trim();
   if (!network || network === "host") return ["--network=host"];
@@ -991,7 +992,7 @@ function formatMsg(agent, m) {
     const items = atts
       .map((a) => {
         const url = a.url?.startsWith("/")
-          ? `${API_BASE.replace(/\/api\/?$/, "")}${a.url}`
+          ? `${AGENT_API_BASE.replace(/\/api\/?$/, "")}${a.url}`
           : a.url;
         return `${a.name} (${a.contentType}, ${a.size}B) → ${url}`;
       })
@@ -1300,7 +1301,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     `  — POST /agent-api/browser  body:{"cmd":"open|snapshot|get text|click|find role|eval|close|…","args":[…]}  — drive a real headless Chromium on the host (shared across all agents). See the \`browser/agent-browser\` skill for full command reference and recipes. Prefer plain \`curl\` for static pages; reach for this when JS must render or you need to click/fill. Always close the session when you're done.`,
     `  — POST /agent-api/uploads   (multipart file upload; returns {key,name,contentType,size,url})`,
     `If a user attaches a file, the attachment line shows the URL — you can curl it directly with your Bearer header.`,
-    `To send a file back: (1) upload with curl -s -X POST -H "Authorization: Bearer <token>" -F file=@/path ${API_BASE}/agent-api/uploads — this returns JSON {key,name,contentType,size,url}. (2) End your reply with an <attachments> block containing a JSON array of one or more of these descriptors, e.g.: <attachments>[{"key":"u/ab12/foo.pdf","name":"foo.pdf","contentType":"application/pdf","size":12345,"url":"/files/u/ab12/foo.pdf"}]</attachments>. The block will be stripped from your message body before it posts.`,
+    `To send a file back: (1) upload with curl -s -X POST -H "Authorization: Bearer <token>" -F file=@/path ${AGENT_API_BASE}/agent-api/uploads — this returns JSON {key,name,contentType,size,url}. (2) End your reply with an <attachments> block containing a JSON array of one or more of these descriptors, e.g.: <attachments>[{"key":"u/ab12/foo.pdf","name":"foo.pdf","contentType":"application/pdf","size":12345,"url":"/files/u/ab12/foo.pdf"}]</attachments>. The block will be stripped from your message body before it posts.`,
     ``,
     `PREFER the <actions> block over curl for anything listed as an action type above. Curl is only for read-only context lookups and file uploads.`,
     `Don't promise OR claim an action without emitting the matching <actions> entry in the same turn. BOTH "I'll create the tasks" AND "Here's the tasks I created" without an <actions> block are broken promises. If your reply says "here's X", "sharing X", "attached X", "posted X" — the matching action MUST be in the same <actions> block this turn. Empty prose like "Here's a cat photo!" with no share_files action is a LIE, not a reply.`,
