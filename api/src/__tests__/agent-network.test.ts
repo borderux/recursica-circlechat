@@ -8,7 +8,7 @@ describe("agentNetworkArgs", () => {
   });
   it("puts the agent on the named network, behind the filter", () => {
     const a = agentNetworkArgs({ CC_AGENT_NETWORK: "cc_agents", CC_AGENT_PROXY: "http://cc-egress:3128", CC_AGENT_NO_PROXY: "api,caddy" });
-    expect(a.slice(0, 2)).toEqual(["--network", "cc_agents"]);
+    expect(a.slice(0, 4)).toEqual(["--network", "cc_agents", "--dns", "127.0.0.1"]);
     expect(a).toContain("HTTPS_PROXY=http://cc-egress:3128");
     expect(a).toContain("no_proxy=api,caddy");
     expect(a).toContain("NODE_USE_ENV_PROXY=1");

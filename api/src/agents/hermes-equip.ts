@@ -155,6 +155,21 @@ export async function installCircleChatTooling(params: {
   // straight into config.yaml (the image's `hermes mcp add` CLI is broken) and
   // adding the auto-generated `mcp-circlechat` toolset to the cli platform so
   // `hermes chat` exposes it without a -t flag.
+  // Extra MCP servers per agent handle, set by the host kit in CC_AGENT_MCP_SERVERS, such as
+  // { "betty": { "recursica-mcp": { "command": "bash", "args": [...] } } }. Written into the agent's
+  // config.yaml beside CircleChat's own server.
+  try {
+    const handle = hermesHome.split(/[\\/]/).filter(Boolean).pop()?.replace(/^\.hermes-/, "") ?? "";
+    const extra = (JSON.parse(process.env.CC_AGENT_MCP_SERVERS ?? "{}") as Record<string, Record<string, unknown>>)[handle];
+    if (extra && Object.keys(extra).length) {
+      const configPath = join(hermesHome, "config.yaml");
+      const cfg = (parseYaml(await fs.readFile(configPath, "utf8")) as Record<string, unknown>) ?? {};
+      cfg.mcp_servers = { ...((cfg.mcp_servers as Record<string, unknown>) ?? {}), ...extra };
+      await fs.writeFile(configPath, stringifyYaml(cfg));
+    }
+  } catch (e) {
+    console.warn(`[hermes-equip] extra MCP servers not written: ${(e as Error).message}`);
+  }
   let mcpRegistered = false;
   if (process.env.CC_MCP_TOOLS === "on") {
     try {

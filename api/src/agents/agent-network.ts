@@ -9,7 +9,9 @@
 export function agentNetworkArgs(env: NodeJS.ProcessEnv = process.env): string[] {
   const network = (env.CC_AGENT_NETWORK ?? "").trim();
   if (!network || network === "host") return ["--network=host"];
-  const args = ["--network", network];
+  // A name server that answers nothing: Docker still resolves the network's own names (api,
+  // egress), and every other lookup fails, so no data leaves inside a lookup.
+  const args = ["--network", network, "--dns", "127.0.0.1"];
   const proxy = (env.CC_AGENT_PROXY ?? "").trim();
   if (proxy) {
     const noProxy = (env.CC_AGENT_NO_PROXY ?? "").trim();
