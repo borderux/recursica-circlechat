@@ -24,8 +24,10 @@ jobs:
       changed: ${{ steps.rebase.outputs.changed }}
       branch: ${{ steps.rebase.outputs.branch }}
     steps:
+      # SYNC_TOKEN, not the built-in token: the built-in token can't push commits that change
+      # .github/workflows/, and the rebased Border commits include one that does.
       - uses: actions/checkout@v5
-        with: { ref: border/local-fixes, fetch-depth: 0 }
+        with: { ref: border/local-fixes, fetch-depth: 0, token: "${{ secrets.SYNC_TOKEN }}" }
       - name: Rebase onto the original and push
         id: rebase
         run: |
