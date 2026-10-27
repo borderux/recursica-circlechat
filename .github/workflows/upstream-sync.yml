@@ -19,7 +19,7 @@ jobs:
   rebase:
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
     outputs:
       changed: ${{ steps.rebase.outputs.changed }}
       branch: ${{ steps.rebase.outputs.branch }}
