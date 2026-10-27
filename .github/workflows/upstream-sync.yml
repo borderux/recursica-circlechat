@@ -1,45 +1,80 @@
-# Weekly: rebase Border UX's branch onto the original CircleChat, run the tests, and open a pull
+# Weekly: rebase this fork's working branch onto the original CircleChat, run the tests, and open a pull
 # request on this fork for a person to review. Posts the link to Slack when the repository secret
 # SLACK_WEBHOOK_URL is set.
+#
+# Three jobs, each with only the permissions it needs:
+#   rebase  - can push, but runs no code from the original repository (git only).
+#   test    - runs the original's code (npm ci, tsc, vitest) with a read-only token that is not
+#             left in the checkout.
+#   propose - opens the pull request, only after the tests pass.
 name: Upstream sync
 
 on:
   schedule: [{ cron: "0 13 * * 1" }]
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
-  sync:
+  rebase:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.rebase.outputs.changed }}
+      branch: ${{ steps.rebase.outputs.branch }}
     steps:
-      - uses: actions/checkout@v4
-        with: { ref: border/local-fixes, fetch-depth: 0 }
-      - uses: actions/setup-node@v4
-        with: { node-version: "22" }
-      - name: Rebase onto the original
+      # SYNC_TOKEN, not the built-in token: the built-in token can't push commits that change
+      # .github/workflows/, and the fork's rebased commits include one that does.
+      - uses: actions/checkout@v5
+        with: { ref: recursica/local-fixes, fetch-depth: 0, token: "${{ secrets.SYNC_TOKEN }}" }
+      - name: Rebase onto the original and push
         id: rebase
         run: |
           git config user.name "upstream-sync"; git config user.email "upstream-sync@users.noreply.github.com"
           git remote add upstream https://github.com/tashfeenahmed/circlechat
           git fetch upstream main
           if git merge-base --is-ancestor upstream/main HEAD; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          git checkout -b "upstream-sync/$(date -u +%Y-%m-%d)"
+          branch="upstream-sync/$(date -u +%Y-%m-%d)"
+          git checkout -b "$branch"
           git rebase upstream/main
+          git push --force origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: rebase
+    if: needs.rebase.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.rebase.outputs.branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with: { node-version: "22" }
       - name: Tests
-        if: steps.rebase.outputs.changed == 'true'
         working-directory: api
         run: npm ci && npx tsc --noEmit -p . && npx vitest run
+
+  propose:
+    needs: [rebase, test]
+    if: needs.rebase.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
       - name: Pull request
-        if: steps.rebase.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.rebase.outputs.branch }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          branch="$(git branch --show-current)"
-          git push --force origin "$branch"
-          url="$(gh pr create --base border/local-fixes --head "$branch" --title "Upstream sync: $(date -u +%Y-%m-%d)" --body "Border UX's branch rebased onto the original CircleChat. Tests passed. Merging updates every stack within the hour.")"
+          url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base recursica/local-fixes --head "$BRANCH" --title "Upstream sync: ${BRANCH#upstream-sync/}" --body "This fork's working branch rebased onto the original CircleChat. Tests passed. Merging updates every stack within the hour.")"
           [ -n "$SLACK_WEBHOOK_URL" ] && curl -fsS -X POST -H 'content-type: application/json' --data "{\"text\":\"CircleChat upstream changes are ready for review: $url\"}" "$SLACK_WEBHOOK_URL" || true
