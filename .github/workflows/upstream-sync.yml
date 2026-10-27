@@ -1,4 +1,4 @@
-# Weekly: rebase Border UX's branch onto the original CircleChat, run the tests, and open a pull
+# Weekly: rebase this fork's working branch onto the original CircleChat, run the tests, and open a pull
 # request on this fork for a person to review. Posts the link to Slack when the repository secret
 # SLACK_WEBHOOK_URL is set.
 #
@@ -25,9 +25,9 @@ jobs:
       branch: ${{ steps.rebase.outputs.branch }}
     steps:
       # SYNC_TOKEN, not the built-in token: the built-in token can't push commits that change
-      # .github/workflows/, and the rebased Border commits include one that does.
+      # .github/workflows/, and the fork's rebased commits include one that does.
       - uses: actions/checkout@v5
-        with: { ref: border/local-fixes, fetch-depth: 0, token: "${{ secrets.SYNC_TOKEN }}" }
+        with: { ref: recursica/local-fixes, fetch-depth: 0, token: "${{ secrets.SYNC_TOKEN }}" }
       - name: Rebase onto the original and push
         id: rebase
         run: |
@@ -76,5 +76,5 @@ jobs:
           BRANCH: ${{ needs.rebase.outputs.branch }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base border/local-fixes --head "$BRANCH" --title "Upstream sync: ${BRANCH#upstream-sync/}" --body "Border UX's branch rebased onto the original CircleChat. Tests passed. Merging updates every stack within the hour.")"
+          url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base recursica/local-fixes --head "$BRANCH" --title "Upstream sync: ${BRANCH#upstream-sync/}" --body "This fork's working branch rebased onto the original CircleChat. Tests passed. Merging updates every stack within the hour.")"
           [ -n "$SLACK_WEBHOOK_URL" ] && curl -fsS -X POST -H 'content-type: application/json' --data "{\"text\":\"CircleChat upstream changes are ready for review: $url\"}" "$SLACK_WEBHOOK_URL" || true
