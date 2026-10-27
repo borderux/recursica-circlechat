@@ -4,6 +4,7 @@ import { Trash2, ShieldCheck, UserMinus, Sun, Moon, Monitor } from "lucide-react
 import { useMe, useWorkspaceMembers, useInvites, useMembersDirectory } from "../lib/hooks";
 import { api } from "../api/client";
 import Segmented from "../components/Segmented";
+import { CloudModelsPolicySection } from "../components/CloudModels";
 import { useTheme, type ThemeMode } from "../lib/theme";
 
 export default function SettingsPage() {
@@ -100,6 +101,8 @@ export default function SettingsPage() {
         )}
 
         {ws && isAdmin && <MembersAdminSection workspaceId={ws.id} workspaceHandle={ws.handle} />}
+
+        {ws && isAdmin && <CloudModelsPolicySection />}
 
         <section className="border border-[var(--color-hair)] rounded p-4 mb-4">
           <h2 className="text-[11px] uppercase tracking-wider text-[var(--color-muted)] font-mono mb-2">Notifications</h2>

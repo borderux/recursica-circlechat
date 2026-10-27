@@ -78,7 +78,7 @@ declare module "fastify" {
   }
 }
 
-async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+export async function requireAgentToken(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const header = req.headers.authorization ?? "";
   const token = header.replace(/^Bearer\s+/i, "");
   if (!token) {

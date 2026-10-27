@@ -22,6 +22,8 @@ import Avatar from "./Avatar";
 import Attachments from "./Attachments";
 import Modal from "./Modal";
 import VerificationBadge from "./VerificationBadge";
+import { CloudModelsField } from "./CloudModels";
+import { describeCloudModels, type CloudModelsSetting } from "../lib/cloudModels";
 import { Popover } from "@base-ui/react/popover";
 import { useMentionPicker, resolveMentionIds } from "../lib/useMentionPicker";
 import { renderMarkdown, scrubIds } from "../lib/md";
@@ -750,6 +752,8 @@ export default function TaskModal({
               </div>
             </div>
 
+            {!spectator && <CloudModelsField taskId={t.id} />}
+
             <div className="tm-rail-field">
               <div className="tm-rail-label">Linked tasks</div>
               {detail.links.length === 0 && !linkDraft && (
@@ -951,6 +955,8 @@ function formatActivity(a: TaskDetail["activity"][number]): string {
       return "removed a link";
     case "comment":
       return "commented";
+    case "cloud_models_changed":
+      return `cloud models → ${describeCloudModels((a.payload as { to?: CloudModelsSetting }).to)}`;
     case "planned": {
       const p = a.payload as { assignee?: string | null; routing?: string; rationale?: string | null };
       const who = p.assignee ? `→ @${p.assignee}` : "(unassigned)";
