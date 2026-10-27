@@ -17,6 +17,8 @@ import {
   goals,
 } from "./db/schema.js";
 import { buildContext } from "./agents/context.js";
+import { runTaskContext } from "./lib/cloud-models.js";
+import { runTaskId } from "./lib/cloud-models-rules.js";
 import { callAgent } from "./agents/adapters/dispatch.js";
 import { applyActions, type AgentAction } from "./agents/executor.js";
 import {
@@ -360,6 +362,7 @@ const worker = new Worker<AgentJobPayload>(
       const workflow = await workflowAgentContext(payload.workflowRunId);
       if (workflow) packet.workflow = workflow;
     }
+    packet.runTask = await runTaskContext(runTaskId(payload, packet.workflow?.input)); // Fork
     const [runControls] = await db.select({ steer: agentRuns.steerJson, followUps: agentRuns.followupJson, timeoutAt: agentRuns.timeoutAt })
       .from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
     if (runControls) packet.runControls = runControls;

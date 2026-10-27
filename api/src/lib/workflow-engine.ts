@@ -18,6 +18,7 @@ import { publishToWorkspace } from "./events.js";
 import { invokeConnector } from "./connector-runtime.js";
 import { parseWorkflowDefinition, readPath, stateById, transitionFor } from "./workflow-definition.js";
 import { enqueueWorkflowRun, WORKFLOW_QUEUE, type WorkflowJobPayload } from "./workflow-queue.js";
+import { assertWorkflowRunTask } from "./cloud-models.js";
 
 type WorkflowRun = typeof workflowRuns.$inferSelect;
 type WorkflowStep = typeof workflowSteps.$inferSelect;
@@ -35,6 +36,7 @@ export async function startWorkflowRun(input: {
     .limit(1);
   if (!workflow) throw new Error("workflow_not_found");
   if (workflow.status !== "active") throw new Error("workflow_paused");
+  await assertWorkflowRunTask(workflow.workspaceId, input.payload); // Fork: input.taskId names the run's task
   const definition = parseWorkflowDefinition(workflow.definitionJson);
   const runId = id("wfrun");
   await db.insert(workflowRuns).values({

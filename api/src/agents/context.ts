@@ -27,6 +27,7 @@ import { loadTaskSummary, maybeSummarizeTaskThread } from "../lib/task-condenser
 import { latestVerdictSummary } from "../lib/task-verifier.js";
 import { buildProjectContext } from "../lib/project-files.js";
 import { approvalExpiresAt } from "../lib/approval-policy.js";
+import type { CloudModelsSetting } from "../lib/cloud-models-rules.js";
 
 export interface MemberInfo {
   memberId: string;
@@ -128,6 +129,9 @@ export interface ContextPacket {
     steer: Array<Record<string, unknown>>;
     followUps: Array<Record<string, unknown>>;
   };
+  // Fork: the task this run works on (null = none) and its
+  // "Cloud models" setting when the run started. See lib/cloud-models.ts.
+  runTask?: { taskId: string | null; cloudModels: CloudModelsSetting };
   runControls?: {
     steer: Array<Record<string, unknown>>;
     followUps: Array<Record<string, unknown>>;
