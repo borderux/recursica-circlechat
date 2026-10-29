@@ -11,12 +11,11 @@ name: perf
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "upstream-sync/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: perf-${{ github.ref }}

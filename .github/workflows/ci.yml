@@ -8,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "upstream-sync/**"]
   workflow_dispatch:
 
 permissions:
