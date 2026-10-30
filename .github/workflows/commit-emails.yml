@@ -1,0 +1,57 @@
+name: commit-emails
+
+# Every commit a pull request adds names only no-reply email addresses: its author, its committer
+# and each Signed-off-by and Co-authored-by line. Those addresses are published with the commit, and
+# a force-push does not take them back, so a personal address has to be caught before the merge.
+# The rules and the allowed addresses are in .github/scripts/check-commit-emails.mjs.
+#
+# Commits already on the original repository's main branch are skipped: an upstream sync brings
+# them in with their authors' own addresses, published there, and this fork cannot change them.
+#
+# Every action is pinned to a commit, with its release in a comment. A tag can be moved to other
+# code. A commit id cannot.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commit-emails-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commit-emails:
+    name: commit email addresses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      UPSTREAM: https://github.com/tashfeenahmed/circlechat
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every commit in the pull request, not one.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: check's own tests
+        run: node --test .github/scripts/check-commit-emails.test.mjs
+
+      # The base branch's copy of the check runs, so a pull request cannot change the check that
+      # judges it. The pull request that adds the check runs its own copy, since the base has none.
+      # The commit ids reach the script through env, never interpolated into it.
+      - name: no email address but a no-reply address in any commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags "$UPSTREAM" main
+          upstream="$(git rev-parse FETCH_HEAD)"
+          script=.github/scripts/check-commit-emails.mjs
+          if git cat-file -e "$BASE_SHA:$script" 2>/dev/null; then
+            git show "$BASE_SHA:$script" > "$RUNNER_TEMP/check-commit-emails.mjs"
+          else
+            cp "$script" "$RUNNER_TEMP/check-commit-emails.mjs"
+          fi
+          node "$RUNNER_TEMP/check-commit-emails.mjs" "$BASE_SHA" "$HEAD_SHA" --skip-reachable-from "$upstream"
