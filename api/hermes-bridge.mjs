@@ -16,7 +16,8 @@ if (!TOKEN) {
 
 function callHermes(message) {
   return new Promise((resolve, reject) => {
-    const args = ["chat", "-q", message, "-Q", "--yolo", "--source", "circlechat"];
+    // Hermes refuses a session source it does not know (see hermesChatArgs in hermes-multi-bridge.mjs).
+    const args = ["chat", "-q", message, "-Q", "--yolo", "--source", "tool"];
     if (PROFILE) args.push("--profile", PROFILE);
     const p = spawn("hermes", args, { timeout: HERMES_TIMEOUT * 1000 });
     let out = "", err = "";

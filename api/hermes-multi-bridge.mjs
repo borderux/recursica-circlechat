@@ -256,10 +256,19 @@ const IMPORTANT_TRIGGERS = new Set([
   "task_comment",
 ]);
 
+// The `hermes chat` arguments for one turn. The session source must be one Hermes knows: its
+// gateway refuses session.create with `invalid_params` (field `source`) for any other value, so a
+// custom tag such as "circlechat" fails every turn before the model is called. Hermes documents
+// `tool` for a third-party integration whose sessions stay out of the user's session lists.
+function hermesChatArgs(prompt, modelOverride) {
+  const args = ["chat", "-q", prompt, "-Q", "--yolo", "--source", "tool"];
+  if (modelOverride) args.push("-m", modelOverride);
+  return args;
+}
+
 function callHermes(prompt, hermesHome, token, modelOverride) {
   return new Promise((resolve, reject) => {
-    const hermesArgs = ["chat", "-q", prompt, "-Q", "--yolo", "--source", "circlechat"];
-    if (modelOverride) hermesArgs.push("-m", modelOverride);
+    const hermesArgs = hermesChatArgs(prompt, modelOverride);
     const envExtras = {
       CC_API_BASE: AGENT_API_BASE,
       CC_BOT_TOKEN: token,
@@ -2021,6 +2030,7 @@ function connect(entry) {
 // unless it's run as the entrypoint (or CC_BRIDGE_IMPORT_ONLY forces import-only).
 export {
   buildHermesSpawn,
+  hermesChatArgs,
   buildPrompt,
   extractActions,
   extractAttachments,
