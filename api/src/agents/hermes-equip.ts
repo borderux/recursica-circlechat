@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as pathResolve, basename } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { readHomeFile, writeHomeFile } from "./home-files.js";
 import {
   HERMES_RUNTIME,
   HERMES_IMAGE,
@@ -158,23 +159,18 @@ export async function installCircleChatTooling(params: {
   // Extra MCP servers per agent handle, set by the host kit in CC_AGENT_MCP_SERVERS, such as
   // { "alice": { "docs": { "command": "node", "args": [...] } } }. Written into the agent's
   // config.yaml beside CircleChat's own server.
+  // config.yaml is read and replaced without following a symlink (home-files.ts).
   try {
-    const handle = hermesHome.split(/[\\/]/).filter(Boolean).pop()?.replace(/^\.hermes-/, "") ?? "";
-    const extra = (JSON.parse(process.env.CC_AGENT_MCP_SERVERS || "{}") as Record<string, Record<string, unknown>>)[handle];
-    if (extra && Object.keys(extra).length) {
-      const configPath = join(hermesHome, "config.yaml");
-      const cfg = (parseYaml(await fs.readFile(configPath, "utf8")) as Record<string, unknown>) ?? {};
-      cfg.mcp_servers = { ...((cfg.mcp_servers as Record<string, unknown>) ?? {}), ...extra };
-      await fs.writeFile(configPath, stringifyYaml(cfg));
-    }
+    await addExtraMcpServers(hermesHome, process.env.CC_AGENT_MCP_SERVERS);
   } catch (e) {
     console.warn(`[hermes-equip] extra MCP servers not written: ${(e as Error).message}`);
+    notes.push(`extra MCP servers not written: ${(e as Error).message.slice(0, 200)}`);
   }
   let mcpRegistered = false;
   if (process.env.CC_MCP_TOOLS === "on") {
     try {
       const configPath = join(hermesHome, "config.yaml");
-      const raw = await fs.readFile(configPath, "utf8");
+      const raw = await readHomeFile(hermesHome, configPath);
       const cfg = (parseYaml(raw) as Record<string, unknown>) ?? {};
       cfg.mcp_servers = {
         ...((cfg.mcp_servers as Record<string, unknown>) ?? {}),
@@ -193,7 +189,7 @@ export async function installCircleChatTooling(params: {
       if (!cli.includes("mcp-circlechat")) cli.push("mcp-circlechat");
       pt.cli = cli;
       cfg.platform_toolsets = pt;
-      await fs.writeFile(configPath, stringifyYaml(cfg));
+      await writeHomeFile(hermesHome, configPath, stringifyYaml(cfg));
       mcpRegistered = true;
       notes.push("registered circlechat MCP read-tools (CC_MCP_TOOLS=on); writes stay on <actions>");
     } catch (e) {
@@ -206,6 +202,20 @@ export async function installCircleChatTooling(params: {
   }
 
   return { skillInstalled, mcpRegistered, notes };
+}
+
+// Merge the extra MCP servers for this home's agent handle (CC_AGENT_MCP_SERVERS) into the home's
+// config.yaml, beside every server already there. config.yaml is read and replaced without
+// following a symlink: a symlink at the home or below it is refused, and nothing is written.
+export async function addExtraMcpServers(hermesHome: string, setting: string | undefined): Promise<boolean> {
+  const handle = hermesHome.split(/[\\/]/).filter(Boolean).pop()?.replace(/^\.hermes-/, "") ?? "";
+  const extra = (JSON.parse(setting || "{}") as Record<string, Record<string, unknown>>)[handle];
+  if (!extra || !Object.keys(extra).length) return false;
+  const configPath = join(hermesHome, "config.yaml");
+  const cfg = (parseYaml(await readHomeFile(hermesHome, configPath)) as Record<string, unknown>) ?? {};
+  cfg.mcp_servers = { ...((cfg.mcp_servers as Record<string, unknown>) ?? {}), ...extra };
+  await writeHomeFile(hermesHome, configPath, stringifyYaml(cfg));
+  return true;
 }
 
 // Native read-only tools exposed to the model via MCP (writes stay on the
