@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
+import { lazy } from "./lazy.js";
 import { envNum } from "./env.js";
 import { clearFinishedJob } from "./queue-dedupe.js";
 
@@ -15,7 +16,8 @@ export interface GoalPlanJob {
   workspaceId?: string;
 }
 
-export const goalQueue = new Queue<GoalPlanJob>(GOAL_QUEUE, {
+// Built on first use (lazy.ts): building a Queue connects Redis at once.
+export const goalQueue = lazy(() => new Queue<GoalPlanJob>(GOAL_QUEUE, {
   connection: redis,
   defaultJobOptions: {
     // The sweeper is the retry driver (it re-enqueues open goals every 3 min),
@@ -29,7 +31,7 @@ export const goalQueue = new Queue<GoalPlanJob>(GOAL_QUEUE, {
     removeOnComplete: 200,
     removeOnFail: 200,
   },
-});
+}));
 
 // Debounce window before a freshly-created goal is planned, so a human editing
 // in the UI (or an agent that creates-then-fills) settles first.

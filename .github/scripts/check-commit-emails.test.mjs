@@ -22,6 +22,22 @@ test("a GitHub no-reply address, GitHub's bots, GitHub's web committer and Anthr
   }
 });
 
+test("every GitHub bot passes, Dependabot's sign-off included, and a person at GitHub does not", () => {
+  // A Dependabot commit as GitHub writes it: the bot's no-reply author, GitHub's web committer and
+  // the bot's Signed-off-by line.
+  assert.deepEqual(problems({
+    sha: "5d51c20aaaaaaaa",
+    author: "49699333+dependabot[bot]@users.noreply.github.com",
+    committer: "noreply@github.com",
+    message: "build(deps): bump a package\n\nBumps a package.\n\nSigned-off-by: dependabot[bot] <support@github.com>",
+  }), []);
+  for (const e of ["support@github.com", "Support@GitHub.com", "41898282+github-actions[bot]@users.noreply.github.com"]) assert.ok(allowed(e), e);
+  // Only GitHub's two exact role addresses: anyone else at github.com is a person.
+  for (const e of ["someone@github.com", "support@github.com.example.com", "support@github.co", "dependabot@github.com"]) {
+    assert.ok(!allowed(e), e);
+  }
+});
+
 test("each place in a commit is named by its kind and line, and the address never appears", () => {
   const found = problems({
     sha: "0123456789abcdef",

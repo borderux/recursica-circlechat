@@ -1,9 +1,11 @@
 import { Queue, QueueEvents } from "bullmq";
 import { redis } from "../lib/redis.js";
+import { lazy } from "../lib/lazy.js";
 
 export const AGENT_QUEUE = "agent-runs";
 
-export const agentQueue = new Queue(AGENT_QUEUE, {
+// Built on first use (lib/lazy.ts): building a Queue connects Redis at once.
+export const agentQueue = lazy(() => new Queue(AGENT_QUEUE, {
   connection: redis,
   defaultJobOptions: {
     attempts: 3,
@@ -11,7 +13,7 @@ export const agentQueue = new Queue(AGENT_QUEUE, {
     removeOnComplete: 500,
     removeOnFail: 500,
   },
-});
+}));
 
 // `autorun` starts a BLOCKING redis read as soon as this module is imported.
 // lib/redis.ts already makes the clients lazy under test, but QueueEvents
@@ -20,10 +22,10 @@ export const agentQueue = new Queue(AGENT_QUEUE, {
 // fails CI with EnvironmentTeardownError even when every test passed. Anything
 // that actually consumes these events calls .run() itself.
 const isTest = !!process.env.VITEST || process.env.NODE_ENV === "test";
-export const agentQueueEvents = new QueueEvents(AGENT_QUEUE, {
+export const agentQueueEvents = lazy(() => new QueueEvents(AGENT_QUEUE, {
   connection: redis,
   autorun: !isTest,
-});
+}));
 
 export interface AgentJobPayload {
   agentId: string;

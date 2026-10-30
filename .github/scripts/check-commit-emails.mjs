@@ -10,6 +10,9 @@
 //     <login>@users.noreply.github.com. GitHub's bots use this form too, such as
 //     github-actions[bot] and dependabot[bot].
 //   - noreply@github.com, the committer GitHub writes for a commit made on github.com.
+//   - support@github.com, the address in dependabot[bot]'s Signed-off-by line. It is GitHub's
+//     own role address, never a person's. Only these two exact github.com addresses pass: a
+//     person at GitHub has a real address at github.com too.
 //   - noreply@anthropic.com, the Co-authored-by address of a commit Claude helped write.
 //
 //   node check-commit-emails.mjs <base> <head> [--skip-reachable-from <ref>]...
@@ -29,6 +32,7 @@ import { fileURLToPath } from "node:url";
 const ALLOWED = [
   /^[^@\s]+@users\.noreply\.github\.com$/i,
   /^noreply@github\.com$/i,
+  /^support@github\.com$/i,
   /^noreply@anthropic\.com$/i,
 ];
 
@@ -100,7 +104,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const found = list.flatMap(problems);
   if (found.length) {
     console.log(
-      `✗ ${found.length} place(s) name an email address other than a GitHub no-reply address, noreply@github.com or noreply@anthropic.com:`,
+      `✗ ${found.length} place(s) name an email address other than a GitHub no-reply address, GitHub's own noreply@github.com or support@github.com, or noreply@anthropic.com:`,
     );
     for (const p of found) console.log(`  ${p}`);
     console.log(
