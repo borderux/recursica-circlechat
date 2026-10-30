@@ -156,7 +156,7 @@ export async function installCircleChatTooling(params: {
   // adding the auto-generated `mcp-circlechat` toolset to the cli platform so
   // `hermes chat` exposes it without a -t flag.
   // Extra MCP servers per agent handle, set by the host kit in CC_AGENT_MCP_SERVERS, such as
-  // { "betty": { "recursica-mcp": { "command": "bash", "args": [...] } } }. Written into the agent's
+  // { "alice": { "docs": { "command": "node", "args": [...] } } }. Written into the agent's
   // config.yaml beside CircleChat's own server.
   try {
     const handle = hermesHome.split(/[\\/]/).filter(Boolean).pop()?.replace(/^\.hermes-/, "") ?? "";
