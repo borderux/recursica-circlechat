@@ -97,3 +97,16 @@ export async function writeHomeFile(home: string, file: string, text: string): P
     throw e;
   }
 }
+
+// Creates a new agent's home, mode 0700 whatever the umask, so no other account on the computer can
+// read the agent's secrets or write to the home. Hermes also refuses a home that another account
+// can write to. The folders above the home are created as needed and keep their own modes. The
+// home itself must not exist: a folder, file or symlink at the path is refused, and left as it is.
+//
+// Under Docker, the agent's container still gets the home: the Hermes image starts as root, gives
+// the home to its own hermes user, then switches to that user. An OpenClaw container runs as root.
+export async function createAgentHome(home: string): Promise<void> {
+  await fs.mkdir(dirname(home), { recursive: true });
+  await fs.mkdir(home, { mode: 0o700 });
+  await fs.chmod(home, 0o700);
+}

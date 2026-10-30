@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { promises as fs, readdirSync, readFileSync, lstatSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readHomeFile, writeHomeFile, SymlinkRefused } from "../agents/home-files.js";
+import { createAgentHome, readHomeFile, writeHomeFile, SymlinkRefused } from "../agents/home-files.js";
 import { addExtraMcpServers } from "../agents/hermes-equip.js";
 
 // An agent's own container can change everything in its Hermes home, so Equip must never follow a
@@ -80,5 +80,42 @@ describe("addExtraMcpServers (Equip's CC_AGENT_MCP_SERVERS step)", () => {
     await expect(addExtraMcpServers(home, SETTING)).rejects.toBeInstanceOf(SymlinkRefused);
     expect(readFileSync(join(outside, "target.yaml"), "utf8")).toBe("outside: true\n");
     expect(lstatSync(config).isSymbolicLink()).toBe(true);
+  });
+});
+
+describe("createAgentHome", () => {
+  it("creates a new agent's home with mode 0700, whatever the umask", async () => {
+    const old = process.umask(0);
+    try {
+      const fresh = join(root, "homes", ".hermes-bob");
+      await createAgentHome(fresh);
+      expect(statSync(fresh).isDirectory()).toBe(true);
+      expect(statSync(fresh).mode & 0o777).toBe(0o700);
+      expect(readdirSync(fresh)).toEqual([]);
+    } finally {
+      process.umask(old);
+    }
+  });
+
+  it("refuses a folder, a file or a symlink already at the path, and leaves it as it is", async () => {
+    await fs.chmod(home, 0o755);
+    await expect(createAgentHome(home)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(statSync(home).mode & 0o777).toBe(0o755);
+    const file = join(root, ".hermes-file");
+    await fs.writeFile(file, "x");
+    await expect(createAgentHome(file)).rejects.toMatchObject({ code: "EEXIST" });
+    const link = join(root, ".hermes-link");
+    await fs.symlink(outside, link);
+    await fs.chmod(outside, 0o755);
+    await expect(createAgentHome(link)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(statSync(outside).mode & 0o777).toBe(0o755);
+  });
+
+  it("is how the install creates each new agent home, and no home is opened to every account", () => {
+    const src = readFileSync(join(__dirname, "../routes/agent-install.ts"), "utf8");
+    expect(src).toContain("await createAgentHome(hermesHome);");
+    expect(src).toContain("await createAgentHome(openclawHome);");
+    expect(src).not.toMatch(/0o777/);
   });
 });
