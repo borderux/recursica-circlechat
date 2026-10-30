@@ -633,10 +633,42 @@ function outsideFences(text, fn) {
     .join("");
 }
 
-// Strip the machinery blocks and apply the rewrites. Mirrors the non-rejecting
-// half of sanitizeAgentProse().
+// Machine data in a reply: an <actions> or <attachments> block, and a line that
+// is one whole JSON value (the bare form extractActions also accepts). The
+// rewrites below are for words a person reads. Inside machine data they corrupt
+// it: a message id turned into "an earlier message" made a react action fail
+// with message_not_found, and `task_comment` would become "a card comment".
+// protectMachineData swaps each piece for a placeholder, and restore() puts the
+// pieces back unchanged.
+const MACHINE_BLOCK_RE = /<(actions|attachments)>[\s\S]*?<\/\1>/gi;
+function protectMachineData(text) {
+  const kept = [];
+  const hold = (s) => {
+    kept.push(s);
+    return `\u0000${kept.length - 1}\u0000`;
+  };
+  const out = String(text || "")
+    .replace(MACHINE_BLOCK_RE, hold)
+    .split("\n")
+    .map((line) => {
+      const t = line.trim();
+      if (!/^[[{][\s\S]*[\]}]$/.test(t)) return line;
+      try {
+        JSON.parse(t);
+        return hold(line);
+      } catch {
+        return line;
+      }
+    })
+    .join("\n");
+  return { text: out, restore: (s) => s.replace(/\u0000(\d+)\u0000/g, (_m, i) => kept[Number(i)]) };
+}
+
+// Strip the machinery blocks and apply the rewrites, outside machine data.
+// Mirrors the non-rejecting half of sanitizeAgentProse().
 function sanitizeProse(text) {
-  let out = String(text || "");
+  const machine = protectMachineData(text);
+  let out = machine.text;
   for (const re of [
     PROSE_TOOL_BLOCK_RE,
     PROSE_LOG_LINE_RE,
@@ -656,12 +688,14 @@ function sanitizeProse(text) {
   }
   out = outsideFences(out, applyProseRewrites);
   out = outsideFences(out, dedupeConsecutiveLines);
-  return out
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]+([,.;:!?])/g, "$1")
-    .replace(/\(\s*\)/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return machine.restore(
+    out
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/[ \t]+([,.;:!?])/g, "$1")
+      .replace(/\(\s*\)/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim(),
+  );
 }
 
 function stripRuntimeNoise(text) {
@@ -936,16 +970,20 @@ function sanitizeActions(arr) {
   return clean;
 }
 function extractActions(text) {
-  const re = /<actions>\s*(\[[\s\S]*?\])\s*<\/actions>/i;
+  // The prompt asks for a JSON array. A single object is taken as a list of
+  // one, and objects one per line as a list, so a small format slip still runs
+  // the actions and posts the reply. The whole block leaves the body either way.
+  const re = /<actions>\s*([[{][\s\S]*?[\]}])\s*<\/actions>/i;
   const m = re.exec(text);
   if (m) {
-    let arr;
+    const body = text.replace(re, "").trim();
+    let parsed;
     try {
-      arr = JSON.parse(m[1]);
+      parsed = JSON.parse(m[1]);
     } catch {
-      return { body: text.replace(re, "").trim(), actions: [] };
+      return { body, actions: extractActions(m[1]).actions };
     }
-    return { body: text.replace(re, "").trim(), actions: sanitizeActions(arr) };
+    return { body, actions: sanitizeActions(Array.isArray(parsed) ? parsed : [parsed]) };
   }
   // No <actions> wrapper — the model sometimes emits the action as a bare JSON
   // object (or ```json fenced) sitting alone on its own line(s), e.g.
@@ -976,6 +1014,8 @@ function extractActions(text) {
   if (!collected.length) return { body: text, actions: [] };
   let body = text;
   for (const [s, e] of spans.reverse()) body = body.slice(0, s) + body.slice(e);
+  // Tags whose content was taken out above, such as an unclosed array.
+  body = body.replace(/<actions>\s*<\/actions>/gi, "");
   return { body: body.trim(), actions: sanitizeActions(collected) };
 }
 
