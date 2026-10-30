@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { SsoOption } from "./sso";
 import {
   api,
   type Me,
@@ -54,6 +55,15 @@ export function useMe() {
 // Whether organic signup is still allowed (true only on a brand-new, zero-user
 // platform). Single-admin model: once the admin exists, signup is closed and
 // the UI shows login only. Backend is the real gate; this just drives the UI.
+export function useSsoOptions() {
+  return useQuery<{ options: SsoOption[] }>({
+    queryKey: ["sso-options"],
+    queryFn: () => api.get("/auth/sso-options"),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
 export function useRegistrationOpen() {
   return useQuery<{ open: boolean }>({
     queryKey: ["registration-open"],
