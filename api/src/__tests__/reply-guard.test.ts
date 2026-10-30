@@ -111,6 +111,10 @@ describe("checkReplyBody — leak classes observed in production", () => {
     },
     // Runtime "no reply / empty content" diagnostics leaking as a message.
     { name: "empty-reply notice", body: "⚠️ No reply: the model returned empty content after retries and any fallback providers. Try `continue`, switch model/provider.", reason: "empty_reply_notice" },
+    // Hermes's own chat-panel copy and settings-upgrade banner, posted as if the agent said them.
+    { name: "Hermes's failed-connection copy", body: "Hermes couldn't start the model connection: invalid_params. Your message was not\nsent. Run `hermes doctor` to check the setup, or /model to pick a different\nprovider.", reason: "hermes_runtime_text" },
+    { name: "Hermes's settings-upgrade banner", body: " ✓ Migrated 1 custom provider(s) to providers: section\n → gateway: http://gateway:4000/v1\nConfig version: 0 → 51", reason: "hermes_runtime_text" },
+    { name: "Hermes's provider-retry copy", body: "custom didn't answer after 3 attempts — it looks temporarily unavailable. Wait a minute and send /retry, or switch models with /model.", reason: "hermes_runtime_text" },
     // New CoT/planning forms.
     { name: "cot: we need to answer", body: "We need to answer the latest user message after summary.", reason: "cot_leak" },
     { name: "cot: looking at my tasks and the board", body: "Looking at my tasks and the board, I can see that task_x is open.", reason: "cot_leak" },

@@ -32,6 +32,14 @@ const HEARTBEAT_RE = /\bHEARTBEAT(?:_OK)?\b/;
 // never a message — reject so it can't post into a user channel.
 const EMPTY_REPLY_NOTICE_RE =
   /\bNo reply:\s*the model returned empty content\b|returned empty content after retries|\bswitch model\/provider\b/i;
+// Hermes's own chat-panel copy for a turn that never reached the model, and
+// the closing line of its settings-upgrade banner. Neither is the agent
+// speaking; posted as the agent's message, either stays in the history that
+// later turns read as the agent's own words. The bridge strips both before
+// posting (stripHermesRuntimeText in hermes-multi-bridge.mjs); this catches a
+// post from anywhere else.
+const HERMES_RUNTIME_TEXT_RE =
+  /Hermes couldn't start the model connection:|^[ \t]*Config version: \d+ → \d+[ \t]*$|didn't answer after \d+ attempts — it looks temporarily unavailable/m;
 // A Python traceback in a reply body means Hermes itself crashed and the
 // bridge's stderr-as-reply fallback picked up the crash dump. Reject
 // rather than post it to the channel.
@@ -812,6 +820,8 @@ export function guardRejectHint(reason: string): string {
       return " Your reply was garbled (random characters from multiple scripts). That's a model glitch, not a message. Re-read the last message and reply in plain English, or emit only an <actions> block / HEARTBEAT_OK.";
     case "empty_reply_notice":
       return " A runtime 'no reply / empty content' notice leaked into your body. Don't post diagnostics. Either take a concrete board action in an <actions> block or stay silent with exactly HEARTBEAT_OK.";
+    case "hermes_runtime_text":
+      return " Your body held Hermes's own runtime message (a failed model connection, or its settings-upgrade banner), not words of yours. Never post it. Write your actual reply to the last message.";
     case "credential_beg":
       return " You asked a human to hand over a secret in chat — never do that. The ONLY way to receive a credential is a request_approval action: describe what you need; if the human approves they attach the secret and it arrives as an env var. If a similar request was already denied, that's final — mark the dependent task \"blocked\" or take an approach that needs no credential.";
     case "capability_failure":
@@ -873,7 +883,7 @@ export function guardRejectHint(reason: string): string {
 
 export function checkReplyBody(
   bodyMd: string,
-  opts?: { hasAttachments?: boolean },
+  opts?: { hasAttachments?: boolean; allowShort?: boolean },
 ): GuardResult {
   // Strip leaked runtime scaffolding (runaway-iterations banner, tool-dispatch
   // failure paragraphs, sign-offs) FIRST so a reply with a substantive body
@@ -896,6 +906,7 @@ export function checkReplyBody(
   if (SCAFFOLD_TALK_RE.test(trimmed)) return { ok: false, reason: "scaffold_talk" };
   if (HEARTBEAT_RE.test(trimmed)) return { ok: false, reason: "heartbeat_leaked" };
   if (EMPTY_REPLY_NOTICE_RE.test(trimmed)) return { ok: false, reason: "empty_reply_notice" };
+  if (HERMES_RUNTIME_TEXT_RE.test(trimmed)) return { ok: false, reason: "hermes_runtime_text" };
   if (TRACEBACK_RE.test(trimmed)) return { ok: false, reason: "python_traceback" };
   if (TOOL_USE_RE.test(trimmed)) return { ok: false, reason: "tool_use_markup" };
   if (TOOL_CALL_JSON_RE.test(trimmed)) return { ok: false, reason: "tool_call_json" };
@@ -936,9 +947,11 @@ export function checkReplyBody(
   // Junk floor. Checked against the SANITIZED body: what a reader would end up
   // seeing is what has to clear the bar, and a body that is only machinery has
   // already been rejected above.
+  // A person waiting on a DM or an @-mention may get a short reply, such as
+  // "Hello! 👋" (allowShort). Every other post keeps the floor.
   if (!opts?.hasAttachments) {
     if (isEmojiOnly(prose.text)) return { ok: false, reason: "emoji_only" };
-    if (prose.text.trim().length < MIN_AGENT_BODY_CHARS) {
+    if (!opts?.allowShort && prose.text.trim().length < MIN_AGENT_BODY_CHARS) {
       return { ok: false, reason: "too_short" };
     }
   }

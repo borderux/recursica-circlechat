@@ -14,6 +14,9 @@ export interface AgentCallResponse {
   // "runaway_max_iterations"). The worker records it as a FAILED run instead
   // of a silent ok; actions (if any) are still applied.
   error?: string;
+  // Replies the runtime could not use, such as a turn that held only the
+  // runtime's own text: where each was meant to go and why, never the text.
+  dropped?: Array<{ conversationId: string | null; reason: string }>;
 }
 
 export async function callAgent(
