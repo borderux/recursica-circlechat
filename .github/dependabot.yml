@@ -1,0 +1,15 @@
+# Dependabot version updates: daily, with a 7-day cooldown, one pull request per package system.
+# Only GitHub Actions: the weekly upstream sync brings the original project's npm updates.
+# Security updates skip the cooldown.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: recursica/local-fixes
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
