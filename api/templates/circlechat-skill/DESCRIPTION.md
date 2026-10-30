@@ -470,10 +470,11 @@ server fetches the URLs for you. No shell upload dance needed.
 ### Sharing files you just generated (PDFs, screenshots, reports)
 
 Each file entry can take `path` instead of `url` — an absolute path under
-`/workspace/` (shared + persistent) or `/tmp/` (browser-skill scratch, same
-turn only). This is how you send a PDF the browser skill just made, a
-screenshot, or a text report you wrote with `write_file`. The server reads
-from disk and attaches.
+`/workspace/` (shared + persistent). This is how you send a PDF the browser
+skill just made, a screenshot, or a text report you wrote with `write_file`.
+The server reads only a regular file inside `/workspace/`, never through a
+link, up to 20 MB: a file in `/tmp/` or your home is in your own container,
+and never attaches.
 
 ```
 # Turn 1: make the PDF (via the agent-browser skill)
@@ -490,7 +491,7 @@ ab("close")
     "conversation_id": "<current conversation>",
     "body_md": "Here's the docs page as a PDF:",
     "files": [
-      {"path": "/tmp/docs.pdf", "name": "example-docs.pdf"}
+      {"path": "/workspace/docs.pdf", "name": "example-docs.pdf"}
     ]
   }
 ]

@@ -63,6 +63,18 @@ const TOOL_CALL_JSON_RE =
 // "tool"-keyed form above — this one keys on "name" + parameters/arguments.
 const TOOL_NAME_JSON_RE =
   /\{\s*["“]name["”]\s*:\s*["“][a-z_][a-z0-9_]*["”]\s*,\s*["“](?:parameters|arguments|args|input)["”]\s*:/i;
+// A tool's arguments written into the reply instead of a tool call: the body
+// opens with a JSON object whose first key is a tool argument. Observed from a
+// gpt-oss agent: the whole reply was `{"code": "import os, textwrap ..."}`, the
+// script that should have written the files, and nothing ran.
+const TOOL_ARGS_JSON_RE =
+  /^\s*(?:```(?:json)?\s*)?\{\s*["“](?:code|command|cmd|path|file_path|content|script|query|input)["”]\s*:/i;
+// gpt-oss's own tool-call markup (its "harmony" format), which the model
+// server turns into a tool call only when the model gets it exactly right.
+const HARMONY_MARKUP_RE = /<\|(?:start|channel|message|call|constrain|end|return)\|>|\bto=functions\.[A-Za-z_]/;
+// The note the bridge adds when it cuts a long reply. A body cut that way no
+// longer ends in "}", so the JSON checks look at the body without it.
+const CUT_NOTE_RE = /\s*_Cut to fit chat: \d+ more characters were not posted\.[^_]*_\s*$/;
 // A code-runtime/interpreter banner dumped into the reply — the agent printed
 // its sandbox env instead of replying. Observed: "Fiber: 0.7.0 (standalone) /
 // Python: 3.13.5 / Pyodide: 0.x". None of these appear in organic chat.
@@ -166,8 +178,12 @@ const PURE_JSON_FENCE_RE = /^\s*```(?:json)?\s*\n\s*[\[{][\s\S]*?[\]}]\s*\n\s*``
 // turn either ships the file via share_to_task / share_files or rewrites
 // the prose to drop the claim. Narrow patterns only: "the file shows" or
 // "I compiled a list" must NOT trigger; only literal attachment promises do.
+// The passive and "created and attached" forms came from a gpt-oss agent that
+// wrote "The files ... have been created and attached to the task." without
+// writing or attaching anything. "the PDF attached to the task" (a file
+// someone else attached) stays allowed.
 const ATTACHMENT_CLAIM_RE =
-  /\b(?:see\s+(?:the\s+)?attached|attached\s+(?:please\s+find|is\s+(?:the|a|my)|herewith|file|files|document|doc|list|report|pdf|spreadsheet|csv|json|markdown)|please\s+find\s+attached|find\s+attached|I(?:'ve|\s+have)\s+attached|attaching\s+(?:the|a|my)|file\s+attached|📎\s*attached)\b/i;
+  /\b(?:see\s+(?:the\s+)?attached|attached\s+(?:please\s+find|is\s+(?:the|a|my)|herewith|file|files|document|doc|list|report|pdf|spreadsheet|csv|json|markdown)|please\s+find\s+attached|find\s+attached|I(?:'ve|\s+have)\s+(?:just\s+)?(?:attached|uploaded)|attaching\s+(?:the|a|my)|file\s+attached|📎\s*attached|(?:has|have)\s+been\s+(?:[a-z]+\s+and\s+)?(?:attached|uploaded)|(?:created|saved|written|generated|wrote)\s+and\s+(?:attached|uploaded))\b/i;
 
 // Fabricated-deployment claim: prose asserting a COMPLETED deploy/upload/
 // publish to an external hosting service with no verifiable URL anywhere in
@@ -807,6 +823,8 @@ export function guardRejectHint(reason: string): string {
       return " You pasted code or a diff into the body. Write the code to a file under /workspace, attach it with share_to_task, and describe the change in plain prose. A short inline snippet in a ```fence``` is fine; a multi-line diff dump is not.";
     case "tool_call_syntax":
       return " You typed a tool call as prose (e.g. update_task(...)). Emit it as an <actions> JSON block instead, e.g. {\"type\":\"update_task\",\"task_id\":\"task_…\",\"status\":\"…\"}.";
+    case "tool_call_as_text":
+      return " Your reply was a tool call written out as text (JSON or code), so nothing ran. Call the tool itself (write_file, terminal, execute_code) through tool calling, then reply in plain prose about what it did.";
     case "tool_call_json":
     case "action_json_leaked":
       return " An action's JSON ended up in your visible reply. Wrap actions in an <actions>[ … ]</actions> block — they are executed from there and stripped from the message, never posted as text.";
@@ -909,6 +927,7 @@ export function checkReplyBody(
   if (HERMES_RUNTIME_TEXT_RE.test(trimmed)) return { ok: false, reason: "hermes_runtime_text" };
   if (TRACEBACK_RE.test(trimmed)) return { ok: false, reason: "python_traceback" };
   if (TOOL_USE_RE.test(trimmed)) return { ok: false, reason: "tool_use_markup" };
+  if (TOOL_ARGS_JSON_RE.test(trimmed) || HARMONY_MARKUP_RE.test(trimmed)) return { ok: false, reason: "tool_call_as_text" };
   if (TOOL_CALL_JSON_RE.test(trimmed)) return { ok: false, reason: "tool_call_json" };
   if (TOOL_NAME_JSON_RE.test(trimmed)) return { ok: false, reason: "tool_call_json" };
   if (ACTION_JSON_RE.test(trimmed)) return { ok: false, reason: "action_json_leaked" };
@@ -937,7 +956,8 @@ export function checkReplyBody(
     return { ok: false, reason: "pure_json_dump" };
   }
   if (VERIFIER_JSON_RE.test(trimmed)) return { ok: false, reason: "verifier_json_leak" };
-  if (BARE_JSON_BODY_RE.test(trimmed) && trimmed.length > 60) {
+  const uncut = trimmed.replace(CUT_NOTE_RE, "");
+  if (BARE_JSON_BODY_RE.test(uncut) && uncut.length > 60) {
     return { ok: false, reason: "pure_json_dump" };
   }
   if (isDiffOnlyBody(trimmed)) return { ok: false, reason: "code_diff_leak" };

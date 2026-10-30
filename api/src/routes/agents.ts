@@ -49,6 +49,9 @@ const PatchBody = z.object({
   config: z.record(z.string(), z.unknown()).optional(),
   // Monthly spend cap in estimated USD; null clears it (unlimited).
   budgetUsdMonth: z.number().min(0).max(1_000_000).nullable().optional(),
+  // Deliverables only: past a short summary, a reply becomes a file, and the
+  // agent's tasks go to review only with a deliverable. Kept in config_json.
+  deliverablesOnly: z.boolean().optional(),
 });
 
 const RegisterBody = z.object({ callbackUrl: z.string().url() });
@@ -238,7 +241,10 @@ export default async function agentRoutes(app: FastifyInstance): Promise<void> {
       .where(and(eq(agents.id, aId), eq(agents.workspaceId, workspaceId!)))
       .limit(1);
     if (!a) return reply.code(404).send({ error: "not_found" });
-    await db.update(agents).set(body).where(eq(agents.id, aId));
+    const { deliverablesOnly, config: _config, ...columns } = body;
+    const patch: Partial<typeof agents.$inferInsert> = { ...columns };
+    if (deliverablesOnly !== undefined) patch.configJson = { ...(a.configJson ?? {}), deliverablesOnly };
+    if (Object.keys(patch).length) await db.update(agents).set(patch).where(eq(agents.id, aId));
     if (typeof body.heartbeatIntervalSec === "number") {
       await scheduleAgentHeartbeat(aId, body.heartbeatIntervalSec);
     }

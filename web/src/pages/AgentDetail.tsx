@@ -208,6 +208,17 @@ export default function AgentDetailPage() {
               />
             </section>
           )}
+          {agent.configJson !== undefined && (
+            <section>
+              <h2 className="text-[11px] uppercase tracking-wider text-[var(--color-muted)] font-mono">Deliverables</h2>
+              <DeliverablesControl
+                agentId={agent.id}
+                current={agent.configJson?.deliverablesOnly === true}
+                onSaved={refresh}
+                readOnly={spectator}
+              />
+            </section>
+          )}
         </div>
 
         <section className="mt-8">
@@ -426,6 +437,55 @@ function BudgetControl({
       <p className="text-[12px] text-[var(--color-muted)]">
         Estimated spend (the agent calls the gateway directly, so costs are derived from run sizes).
         At the cap the agent pauses until you raise it or the month rolls over.
+      </p>
+      {err && <p role="alert" className="text-[12px] text-red-600">{err}</p>}
+    </div>
+  );
+}
+
+// Deliverables only: anything past a short summary becomes a file, and the
+// agent's tasks go to review only with a deliverable on them.
+function DeliverablesControl({
+  agentId,
+  current,
+  onSaved,
+  readOnly,
+}: {
+  agentId: string;
+  current: boolean;
+  onSaved: () => void;
+  readOnly?: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function toggle(next: boolean) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.patch(`/agents/${agentId}`, { deliverablesOnly: next });
+      onSaved();
+    } catch (e) {
+      setErr((e as Error).message ?? "save_failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-1 space-y-2">
+      <label className="flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          checked={current}
+          disabled={busy || readOnly}
+          onChange={(e) => toggle(e.target.checked)}
+        />
+        Deliverables only
+      </label>
+      <p className="text-[12px] text-[var(--color-muted)]">
+        Every document goes to its task as a file, and chat gets a one- or two-sentence summary. A task
+        moves to review only with a deliverable attached.
       </p>
       {err && <p role="alert" className="text-[12px] text-red-600">{err}</p>}
     </div>

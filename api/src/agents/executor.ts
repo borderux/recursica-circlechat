@@ -36,14 +36,14 @@ import { planGoal } from "../lib/planner.js";
 import { latestVerificationRationale } from "../lib/task-verifier.js";
 import { editAgentBlock } from "../lib/memory-blocks.js";
 import { repairAction, type RepairCtx } from "./action-repair.js";
-import { CONTAINER_HERMES_HOME } from "./hermes-runtime.js";
-import { resolveHermesHome } from "./hermes-equip.js";
+import { readWorkspaceFile, WorkspaceRefused } from "../lib/workspace-read.js";
 import { formatDelegationBrief } from "../lib/delegation.js";
 import { runCodeEnabled, runCodeSandboxed, formatCodeResult } from "../lib/code-sandbox.js";
 import { redis } from "../lib/redis.js";
 import { loadLedger, appendFact, appendProgressNote, appendDeadEnd } from "../lib/ledger-core.js";
 import { putObject, publicUrl, readObject } from "../lib/storage.js";
-import { createArtifact, isSubstantiveContent } from "../lib/task-artifacts.js";
+import { createArtifact, isSubstantiveContent, liveArtifactRows } from "../lib/task-artifacts.js";
+import { bodyLimit, splitLongReply } from "./long-reply.js";
 import { notifyForMessage, notifyApprovers } from "../lib/notifications.js";
 import { writeProjectFile } from "../lib/project-files.js";
 import {
@@ -130,13 +130,13 @@ export type AgentAction =
       attachments?: AgentAttachment[];
     }
   // Fetch one or more URLs server-side OR pick up files the agent wrote to
-  // /tmp, then post them as attachments. Saves the agent from a six-step
+  // /workspace, then post them as attachments. Saves the agent from a six-step
   // shell ritual (urllib/tempfile/multipart/parse/<attachments> block) for
-  // the common "share a photo from the web" and "browser pdf /tmp/x.pdf
+  // the common "share a photo from the web" and "browser pdf /workspace/x.pdf
   // then send it" flows. Without this, faced with the friction, agents
   // tend to just create_task for themselves instead of doing the work.
   // Each file entry must provide exactly one of `url` (http/https) or
-  // `path` (absolute path under /tmp/).
+  // `path` (absolute path under /workspace/).
   | {
       type: "share_files";
       conversation_id: string;
@@ -210,8 +210,45 @@ export interface DroppedReply {
 // conversation where a person waits on this turn (a DM, or a person's
 // @-mention): a short reply there is allowed, and a reply that cannot be posted
 // is replaced with the no-reply note (waiting.ts).
-interface ApplyCtx {
+export interface ApplyCtx {
   waitingIn?: string | null;
+  // Files share_to_task / share_files attached in this turn, and the sources
+  // they could not attach. File actions run first (fileActionsFirst), so a
+  // message or a status change in the same turn is checked against what
+  // really attached, not against what the agent said.
+  filesAttached?: number;
+  filesMissing?: string[];
+  // The agent's deliverables-only setting (agents.config_json.deliverablesOnly):
+  // anything past a short summary goes into a file, and a task goes to review
+  // only with a deliverable on it.
+  deliverablesOnly?: boolean;
+}
+
+// share_to_task and share_files run before the rest of a turn's actions, in
+// their own order, so the turn's messages and status changes see which files
+// really attached. Everything else keeps its order.
+const FILE_ACTIONS = new Set(["share_to_task", "share_files"]);
+export function fileActionsFirst<T>(actions: T[]): T[] {
+  const isFile = (a: T) => {
+    const type = String((a as { type?: unknown } | null)?.type ?? "");
+    return FILE_ACTIONS.has(ACTION_ALIASES[type] ?? type);
+  };
+  return [...actions.filter(isFile), ...actions.filter((a) => !isFile(a))];
+}
+
+export function deliverablesOnlyFrom(config: unknown): boolean {
+  return Boolean(config && typeof config === "object" && (config as Record<string, unknown>).deliverablesOnly === true);
+}
+
+// What an agent's message gets instead of a claim that files were attached
+// when none were. It names what was not found, so the person asking knows
+// nothing arrived, and the agent sees it in the conversation on its next turn.
+export function notAttachedNote(missing: string[]): string {
+  if (!missing.length) return "_Not attached: this reply said a file was attached, but no file was shared with it._";
+  const shown = missing.slice(0, 5).map((m) => `\`${m}\``).join(", ");
+  const more = missing.length > 5 ? ` and ${missing.length - 5} more` : "";
+  const one = missing.length === 1;
+  return `_Not attached: ${shown}${more} ${one ? "was" : "were"} not found in /workspace, so nothing was shared. Write the file there, check it exists, then share it again._`;
 }
 
 const recordDrop = (out: ExecOutcome, conversationId: string | null, reason: string) => {
@@ -625,7 +662,11 @@ export async function applyActions(params: {
 }): Promise<ExecOutcome> {
   const { agentId, runId } = params;
   const out: ExecOutcome = { actionsApplied: 0, errors: [], trace: [] };
-  const ctx: ApplyCtx = { waitingIn: params.waiting ? (params.triggerConversationId ?? null) : null };
+  const ctx: ApplyCtx = {
+    waitingIn: params.waiting ? (params.triggerConversationId ?? null) : null,
+    filesAttached: 0,
+    filesMissing: [],
+  };
 
   const [agentMember] = await db
     .select()
@@ -636,6 +677,12 @@ export async function applyActions(params: {
     out.errors.push("agent_member_missing");
     return out;
   }
+  const [agentConfig] = await db
+    .select({ configJson: agents.configJson })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1);
+  ctx.deliverablesOnly = deliverablesOnlyFrom(agentConfig?.configJson);
 
   // Pre-dispatch auto-repair context: the agent's sole open task (the only
   // unambiguous fix for a placeholder task_id) and the trigger conversation.
@@ -657,7 +704,7 @@ export async function applyActions(params: {
     scopes = agentRow?.scopes ?? [];
   }
 
-  for (const a of params.actions) {
+  for (const a of fileActionsFirst(params.actions)) {
     // Server-side belt for action-name paraphrases. The bridge normalizes
     // synonyms (comment_on_task → task_comment, etc.) before actions reach
     // here, but actions can arrive from other callers too; normalize again so
@@ -788,11 +835,25 @@ async function applyOne(
 ): Promise<void> {
   switch (a.type) {
     case "post_message": {
-      const hasAttachments = Array.isArray(a.attachments) && a.attachments.length > 0;
+      // Files a share action attached earlier in this turn count too.
+      const hasAttachments = (Array.isArray(a.attachments) && a.attachments.length > 0) || (ctx.filesAttached ?? 0) > 0;
       // A person waiting in this conversation may get a short reply, such as a
       // greeting. A post nobody asked for keeps the length floor.
       const allowShort = Boolean(ctx.waitingIn) && a.conversation_id === ctx.waitingIn;
       const guard = checkReplyBody(a.body_md, { hasAttachments, allowShort });
+      if (!guard.ok && guard.reason === "attachment_claim_no_file") {
+        // The claim is not posted. A note says what did not attach, so nobody
+        // waits on files that do not exist.
+        out.trace.push("post_message rejected (attachment_claim_no_file); posted the not-attached note");
+        out.errors.push(`post_message rejected: attachment_claim_no_file.${guardRejectHint(guard.reason)}`);
+        await applyOne(agentId, runId, agentMemberId, {
+          type: "post_message",
+          conversation_id: a.conversation_id,
+          body_md: notAttachedNote(ctx.filesMissing ?? []),
+          ...(a.reply_to ? { reply_to: a.reply_to } : {}),
+        }, out, ctx);
+        return;
+      }
       if (!guard.ok) {
         out.trace.push(`post_message rejected (${guard.reason})`);
         out.errors.push(
@@ -856,13 +917,20 @@ async function applyOne(
 
       const mid = id("m");
       const now = new Date();
+      // Too long for chat: the whole reply goes into reply.md, never cut.
+      const split = splitLongReply(guard.bodyMd, bodyLimit("chat", Boolean(ctx.deliverablesOnly)));
+      const posted = split.body;
       const safeAttachments = sanitizeAttachments(a.attachments);
+      if (split.file) {
+        safeAttachments.push(await storeTextFile(split.file));
+        out.trace.push(`post_message: ${guard.bodyMd.length}-char reply attached as ${split.file.name}`);
+      }
       await db.insert(messages).values({
         id: mid,
         conversationId: a.conversation_id,
         memberId: agentMemberId,
         parentId: a.reply_to ?? null,
-        bodyMd: guard.bodyMd,
+        bodyMd: posted,
         attachmentsJson: safeAttachments,
         mentions: resolvedMentionIds,
         ts: now,
@@ -872,7 +940,7 @@ async function applyOne(
         conversationId: a.conversation_id,
         memberId: agentMemberId,
         parentId: a.reply_to ?? null,
-        bodyMd: guard.bodyMd,
+        bodyMd: posted,
         attachmentsJson: safeAttachments,
         mentions: resolvedMentionIds,
         ts: now.toISOString(),
@@ -889,7 +957,7 @@ async function applyOne(
           authorMemberId: agentMemberId,
           conversationId: a.conversation_id,
           messageId: mid,
-          bodyMd: guard.bodyMd,
+          bodyMd: posted,
           parentId: a.reply_to ?? null,
           workspaceId,
           resolvedMentionIds,
@@ -905,7 +973,7 @@ async function applyOne(
           conversationId: a.conversation_id,
           messageId: mid,
           authorMemberId: agentMemberId,
-          bodyMd: guard.bodyMd,
+          bodyMd: posted,
           directMentionIds,
           isDm: await isDmConversation(a.conversation_id),
         }).catch(() => {});
@@ -1221,6 +1289,13 @@ async function applyOne(
     case "update_task": {
       const ws = await loadAgentWorkspace(agentMemberId);
       if (!ws) throw new Error("agent_workspace_missing");
+      if (a.status === "review") {
+        const denial = await reviewDenial(a.task_id, ctx);
+        if (denial) {
+          out.errors.push(denial);
+          return;
+        }
+      }
       const r = await updateTask(
         a.task_id,
         {
@@ -1381,12 +1456,17 @@ async function applyOne(
     case "task_comment": {
       const ws = await loadAgentWorkspace(agentMemberId);
       if (!ws) throw new Error("agent_workspace_missing");
-      const hasAttachments = Array.isArray(a.attachments) && a.attachments.length > 0;
+      const hasAttachments = (Array.isArray(a.attachments) && a.attachments.length > 0) || (ctx.filesAttached ?? 0) > 0;
       const guard = checkReplyBody(a.body_md, { hasAttachments });
       if (!guard.ok) {
         out.errors.push(
           `task_comment rejected: ${guard.reason}.${guardRejectHint(guard.reason)}`,
         );
+        if (guard.reason === "attachment_claim_no_file") {
+          // Said on the task where the files were expected.
+          const r = await addComment(a.task_id, notAttachedNote(ctx.filesMissing ?? []), [], agentMemberId, ws, []);
+          if (!("error" in r)) out.trace.push(`task_comment rejected (attachment_claim_no_file); posted the not-attached note on ${a.task_id}`);
+        }
         return;
       }
       // BLOCKED PROTOCOL enforcement: re-stating a blocker (esp. begging for
@@ -1414,9 +1494,13 @@ async function applyOne(
         return;
       }
       const safeAttachments = sanitizeAttachments(a.attachments);
+      // Too long for a comment, or past a summary for a deliverables-only
+      // agent: the whole text goes into reply.md on the task, never cut.
+      const split = splitLongReply(guard.bodyMd, bodyLimit("task", Boolean(ctx.deliverablesOnly)));
+      if (split.file) safeAttachments.push(await storeTextFile(split.file));
       const r = await addComment(
         a.task_id,
-        guard.bodyMd,
+        split.body,
         Array.isArray(a.mentions) ? a.mentions : [],
         agentMemberId,
         ws,
@@ -1425,6 +1509,17 @@ async function applyOne(
       if ("error" in r) {
         out.errors.push(`task_comment: ${r.error}`);
         return;
+      }
+      if (split.file && ctx.deliverablesOnly) {
+        // For a deliverables-only agent the text is the deliverable.
+        await createArtifact({
+          taskId: a.task_id,
+          workspaceId: ws,
+          name: split.file.name,
+          buffer: Buffer.from(split.file.text, "utf8"),
+          contentType: "text/markdown",
+          createdBy: agentMemberId,
+        }).catch((e: Error) => out.trace.push(`task_comment artifact ${split.file!.name} failed: ${e.message}`));
       }
       out.trace.push(`task_comment on ${a.task_id}${safeAttachments.length ? ` (${safeAttachments.length} file${safeAttachments.length === 1 ? "" : "s"})` : ""}`);
       return;
@@ -1454,13 +1549,18 @@ async function applyOne(
       const guard = checkReplyBody(rawBody || "(attachments)");
       const bodyMd = guard.ok ? guard.bodyMd : rawBody;
       const files = Array.isArray(a.files) ? a.files : [];
-      const { attachments: fetched, skips } = await fetchAgentAttachments(files, out.trace, "share_to_task", agentId);
+      const { attachments: fetched, skips, missing } = await fetchAgentAttachments(files, out.trace, "share_to_task");
+      ctx.filesAttached = (ctx.filesAttached ?? 0) + fetched.length;
+      ctx.filesMissing = [...(ctx.filesMissing ?? []), ...missing];
       if (fetched.length === 0) {
         const why = skips.length ? ` (${skips.join("; ")})` : "";
         out.errors.push(
           `share_to_task: no files fetched from ${files.length} source(s)${why}. ` +
             `Run \`ls -R /workspace\` to find the exact path you actually wrote, then share that — a path that doesn't exist won't attach.`,
         );
+        // On the task too, where people look for the files.
+        const r = await addComment(a.task_id, notAttachedNote(missing), [], agentMemberId, ws, []);
+        if (!("error" in r)) out.trace.push(`share_to_task: posted the not-attached note on ${a.task_id}`);
         return;
       }
       const r = await addComment(
@@ -1531,7 +1631,9 @@ async function applyOne(
       if (!mm) throw new Error("agent_not_in_conversation");
 
       const files = Array.isArray(a.files) ? a.files : [];
-      const { attachments: fetched, skips } = await fetchAgentAttachments(files, out.trace, "share_files", agentId);
+      const { attachments: fetched, skips, missing } = await fetchAgentAttachments(files, out.trace, "share_files");
+      ctx.filesAttached = (ctx.filesAttached ?? 0) + fetched.length;
+      ctx.filesMissing = [...(ctx.filesMissing ?? []), ...missing];
 
       if (fetched.length === 0) {
         const why = skips.length ? ` (${skips.join("; ")})` : "";
@@ -1539,6 +1641,12 @@ async function applyOne(
           `share_files: no files fetched from ${files.length} source(s)${why}. ` +
             `Check the path/url actually exists — a /workspace path you didn't write won't attach.`,
         );
+        await applyOne(agentId, runId, agentMemberId, {
+          type: "post_message",
+          conversation_id: a.conversation_id,
+          body_md: notAttachedNote(missing),
+          ...(a.reply_to ? { reply_to: a.reply_to } : {}),
+        }, out, ctx);
         return;
       }
 
@@ -1659,39 +1767,44 @@ async function isDmConversation(conversationId: string): Promise<boolean> {
   return c?.kind === "dm";
 }
 
+// Stores <file> (a long reply's text) and returns its attachment.
+async function storeTextFile(file: { name: string; text: string }): Promise<AgentAttachment> {
+  const buf = Buffer.from(file.text, "utf8");
+  const key = `u/${id("f").slice(2)}/${file.name}`;
+  await putObject(key, buf);
+  return { key, name: file.name, contentType: "text/markdown", size: buf.length, url: publicUrl(key) };
+}
+
+// Why a task may not go to review now, or null. A turn whose shares all failed
+// has nothing to review. A deliverables-only agent needs a deliverable on the
+// task: a link or a summary is not one.
+export async function reviewDenial(
+  taskId: string,
+  ctx: ApplyCtx,
+  artifactCount: (taskId: string) => Promise<number> = async (t) => (await liveArtifactRows(t)).length,
+): Promise<string | null> {
+  if ((ctx.filesMissing?.length ?? 0) > 0 && !(ctx.filesAttached ?? 0)) {
+    return `update_task: review_without_deliverable — none of the files you shared this turn attached (${ctx.filesMissing!.join(", ")}), so ${taskId} stays where it is. Write each file under /workspace, check it exists, share_to_task it, then set "review".`;
+  }
+  if (ctx.deliverablesOnly && (await artifactCount(taskId)) === 0) {
+    return `update_task: review_without_deliverable — ${taskId} has no deliverable on it. Attach the file with share_to_task first, then set "review".`;
+  }
+  return null;
+}
+
 // Server-side file ingest shared by share_files + share_to_task. Each source
-// is either a URL (fetched over HTTPS) or an absolute /tmp path (read from
-// disk). Output goes straight into storage under u/<id>/<name> and returns
+// is either a URL (fetched over HTTPS) or an absolute /workspace path (read
+// from the shared workspace). Output goes straight into storage under u/<id>/<name> and returns
 // descriptor shape ready to paste into a message or task comment.
 //
 // Limits: 10 files per call, 20 MB per file, 15s per URL fetch. Anything
 // that misses those just logs a trace line and is skipped — one bad source
 // doesn't kill the whole action.
-// Resolve (and cache) an agent's HOST home dir from its id, so the path
-// translation below can map a container-local /opt/data/… path back to a file
-// this api container can actually read.
-const agentHomeCache = new Map<string, string>();
-async function resolveAgentHomeDir(agentId: string): Promise<string> {
-  if (!agentId) return "";
-  const cached = agentHomeCache.get(agentId);
-  if (cached !== undefined) return cached;
-  const [row] = await db
-    .select({ handle: agents.handle })
-    .from(agents)
-    .where(eq(agents.id, agentId))
-    .limit(1);
-  const home = await resolveHermesHome(agentId, row?.handle ?? "").catch(() => "");
-  agentHomeCache.set(agentId, home);
-  return home;
-}
-
-async function fetchAgentAttachments(
+export async function fetchAgentAttachments(
   files: Array<{ url?: string; path?: string; name?: string }>,
   trace: string[],
   actionLabel: "share_files" | "share_to_task",
-  agentId = "",
-): Promise<{ attachments: AgentAttachment[]; skips: string[] }> {
-  const agentHome = await resolveAgentHomeDir(agentId);
+): Promise<{ attachments: AgentAttachment[]; skips: string[]; missing: string[] }> {
   const MAX_FILES = 10;
   const MAX_BYTES = 20 * 1024 * 1024;
   const FETCH_TIMEOUT_MS = 15_000;
@@ -1703,11 +1816,16 @@ async function fetchAgentAttachments(
   // name or subdir); without the reason it just retries the same bad path.
   const traceStart = trace.length;
   const fetched: AgentAttachment[] = [];
+  // Each requested source, and the ones that attached: the rest are reported
+  // back as missing, so a message claiming them can be flagged.
+  const requested: string[] = [];
+  const attached: string[] = [];
   for (const f of slice) {
     const rawUrl = typeof f?.url === "string" ? f.url : "";
     const rawPath = typeof f?.path === "string" ? f.path : "";
     const hasUrl = rawUrl.length > 0;
     const hasPath = rawPath.length > 0;
+    requested.push(rawPath || rawUrl || "(no path)");
     if (hasUrl === hasPath) {
       trace.push(`${actionLabel} skip: exactly one of {url,path} required`);
       continue;
@@ -1739,37 +1857,19 @@ async function fetchAgentAttachments(
         contentType = (res.headers.get("content-type") ?? "").split(";")[0].trim() || contentType;
         nameHint = finalUrl.pathname.split("/").pop() ?? "";
       } else {
-        // Local path. The agent runs INSIDE a hermes container whose HERMES_HOME
-        // is mounted at /opt/data, so it reports paths like
-        // /opt/data/cache/screenshots/x.png — which don't exist in THIS (api)
-        // container. Translate that prefix back to the agent's host home
-        // (/opt/hermes-homes/.hermes-<agent>/…), which this container DOES mount,
-        // so browser screenshots/pdfs actually attach instead of silently
-        // failing (the #1 cause of "see attached" with no file). Then restrict to
-        // /tmp/, the shared /workspace/, or the agent's own home — no arbitrary
-        // reads, and no reading another agent's home.
-        const { resolve: pResolve } = await import("node:path");
-        const { promises: fsp } = await import("node:fs");
-        let abs = pResolve(rawPath);
-        if (agentHome && (abs === CONTAINER_HERMES_HOME || abs.startsWith(CONTAINER_HERMES_HOME + "/"))) {
-          abs = pResolve(agentHome + abs.slice(CONTAINER_HERMES_HOME.length));
-        }
-        const underHome = !!agentHome && (abs === agentHome || abs.startsWith(agentHome + "/"));
-        if (!abs.startsWith("/tmp/") && !abs.startsWith("/workspace/") && !underHome) {
-          trace.push(`${actionLabel} skip: path must be under /tmp/, /workspace/, or your home (got ${rawPath})`);
+        // Local path: a file in the shared workspace, which this container
+        // mounts at /workspace. Only a regular file inside it is read, never
+        // through a link anywhere on the path, and never over MAX_BYTES (see
+        // lib/workspace-read.ts). Paths in the agent's own container, such as
+        // /tmp or its home at /opt/data, are not this container's files.
+        try {
+          buf = await readWorkspaceFile(rawPath, MAX_BYTES);
+        } catch (e) {
+          if (!(e instanceof WorkspaceRefused)) throw e;
+          trace.push(`${actionLabel} skip ${rawPath}: ${e.message}. Write the file under /workspace/ and share that path.`);
           continue;
         }
-        const stat = await fsp.stat(abs).catch(() => null);
-        if (!stat || !stat.isFile()) {
-          trace.push(`${actionLabel} skip ${abs}: not a regular file`);
-          continue;
-        }
-        if (stat.size > MAX_BYTES) {
-          trace.push(`${actionLabel} skip ${abs}: ${stat.size}B > ${MAX_BYTES}B`);
-          continue;
-        }
-        buf = await fsp.readFile(abs);
-        nameHint = abs.split("/").pop() ?? "";
+        nameHint = rawPath.split("/").pop() ?? "";
         contentType = contentTypeForName(nameHint, contentType);
       }
 
@@ -1788,12 +1888,15 @@ async function fetchAgentAttachments(
         size: buf.length,
         url: publicUrl(key),
       });
+      attached.push(hasUrl ? rawUrl : rawPath);
     } catch (e) {
       trace.push(`${actionLabel} source ${hasUrl ? rawUrl : rawPath} failed: ${(e as Error).message}`);
     }
   }
   const skips = trace.slice(traceStart).filter((s) => s.includes(" skip") || s.includes(" failed:"));
-  return { attachments: fetched, skips };
+  const missing = [...requested];
+  for (const src of attached) missing.splice(missing.indexOf(src), 1);
+  return { attachments: fetched, skips, missing };
 }
 
 // Agents may emit attachments via post_message. Require the file to have been
