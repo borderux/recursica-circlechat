@@ -3,7 +3,8 @@ import { useNavigate, Link } from "react-router-dom";
 import { api } from "../api/client";
 import { humanizeError } from "../api/errors";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRegistrationOpen } from "../lib/hooks";
+import { useRegistrationOpen, useSsoOptions } from "../lib/hooks";
+import { ssoButtons } from "../lib/sso";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -12,6 +13,7 @@ export default function LoginPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const reg = useRegistrationOpen();
+  const sso = ssoButtons(useSsoOptions().data?.options, import.meta.env.VITE_API_URL ?? "/api");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -61,6 +63,19 @@ export default function LoginPage() {
             Sign in
           </button>
         </form>
+        {sso.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {sso.map((button) => (
+              <a
+                key={button.href}
+                href={button.href}
+                className="block w-full text-center border border-[var(--color-hair-2)] rounded py-2 text-[13px] font-medium"
+              >
+                {button.label}
+              </a>
+            ))}
+          </div>
+        )}
         {reg.data?.open && (
           <p className="text-[12px] text-[var(--color-muted)] mt-5 text-center">
             No workspace yet? <Link to="/signup" className="text-[var(--color-accent-blue)]">Create one</Link>

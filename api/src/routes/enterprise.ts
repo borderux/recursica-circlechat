@@ -22,6 +22,7 @@ import { requirePermission, workspaceAccess, writeAudit } from "../lib/access-co
 import { config } from "../lib/config.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-box.js";
 import { id, rawToken } from "../lib/ids.js";
+import { checkOidcEndpoint, oidcFetch, oidcProvider } from "../lib/oidc-endpoints.js";
 import { redis } from "../lib/redis.js";
 import { startWorkflowRun } from "../lib/workflow-engine.js";
 
@@ -75,10 +76,7 @@ async function discovery(issuer: string): Promise<OidcDiscovery> {
   const response = await fetch(`${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`oidc_discovery_${response.status}`);
   const parsed = z.object({ authorization_endpoint: z.string().url(), token_endpoint: z.string().url(), userinfo_endpoint: z.string().url() }).parse(await response.json());
-  for (const endpoint of Object.values(parsed)) {
-    const next = new URL(endpoint);
-    if (next.origin !== url.origin) throw new Error("oidc_cross_origin_endpoint");
-  }
+  for (const endpoint of Object.values(parsed)) await checkOidcEndpoint(issuer, endpoint);
   return parsed;
 }
 
@@ -196,6 +194,15 @@ export default async function enterpriseRoutes(app: FastifyInstance): Promise<vo
 }
 
 export async function enterprisePublicRoutes(app: FastifyInstance): Promise<void> {
+  // The login page's sign-in buttons: each workspace with SSO turned on, and
+  // its provider. No issuer, client or domain details.
+  app.get("/auth/sso-options", async () => {
+    const rows = await db.select({ handle: workspaces.handle, name: workspaces.name, issuer: ssoConnections.issuer })
+      .from(ssoConnections).innerJoin(workspaces, eq(workspaces.id, ssoConnections.workspaceId))
+      .where(eq(ssoConnections.enabled, true)).orderBy(workspaces.name);
+    return { options: rows.map((row) => ({ workspace: row.handle, workspaceName: row.name, provider: oidcProvider(row.issuer) })) };
+  });
+
   app.get("/auth/sso/:workspaceHandle", async (req, reply) => {
     const handle = (req.params as { workspaceHandle: string }).workspaceHandle;
     const [row] = await db.select({ connection: ssoConnections, workspace: workspaces })
@@ -227,14 +234,14 @@ export async function enterprisePublicRoutes(app: FastifyInstance): Promise<void
     if (!connection) return reply.code(404).send({ error: "sso_not_configured" });
     const doc = await discovery(connection.issuer);
     const { clientSecret } = decryptSecret<{ clientSecret: string }>(connection.clientSecretCiphertext);
-    const tokenResponse = await fetch(doc.token_endpoint, {
+    const tokenResponse = await oidcFetch(connection.issuer, doc.token_endpoint, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body: new URLSearchParams({ grant_type: "authorization_code", code: query.code, redirect_uri: callbackUrl(), client_id: connection.clientId, client_secret: clientSecret, code_verifier: state.verifier }),
+      body: new URLSearchParams({ grant_type: "authorization_code", code: query.code, redirect_uri: callbackUrl(), client_id: connection.clientId, client_secret: clientSecret, code_verifier: state.verifier }).toString(),
       signal: AbortSignal.timeout(10_000),
     });
     if (!tokenResponse.ok) return reply.code(401).send({ error: "oidc_token_exchange_failed" });
     const token = z.object({ access_token: z.string().min(1) }).parse(await tokenResponse.json());
-    const userResponse = await fetch(doc.userinfo_endpoint, { headers: { authorization: `Bearer ${token.access_token}`, accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
+    const userResponse = await oidcFetch(connection.issuer, doc.userinfo_endpoint, { headers: { authorization: `Bearer ${token.access_token}`, accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
     if (!userResponse.ok) return reply.code(401).send({ error: "oidc_userinfo_failed" });
     const identity = z.object({ sub: z.string(), email: z.string().email(), email_verified: z.boolean().optional(), name: z.string().optional(), preferred_username: z.string().optional() }).parse(await userResponse.json());
     if (identity.email_verified === false) return reply.code(403).send({ error: "oidc_email_unverified" });
