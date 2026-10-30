@@ -70,12 +70,19 @@ jobs:
             perf/results.json
           if-no-files-found: ignore
 
+      # The report on the run's summary page, on every run. Needs no permission.
+      - name: Report on the run's summary page
+        if: always()
+        run: cat perf/report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "_perf report not produced._" >> "$GITHUB_STEP_SUMMARY"
+
       # Comment ONLY when a gated metric actually regressed vs baseline.
       # Routine PRs (no regression) stay silent — the full report is always
       # available as the uploaded `perf-report` artifact. This stops the bot
       # from emailing a perf comment on every single PR.
       - name: Comment report on PR (regressions only)
         if: github.event_name == 'pull_request' && always()
+        # The token is read-only, so GitHub can refuse the comment. Perf never blocks a merge.
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           script: |
