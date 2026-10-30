@@ -979,6 +979,103 @@ function extractActions(text) {
   return { body: body.trim(), actions: sanitizeActions(collected) };
 }
 
+// ── Hermes's own runtime text ───────────────────────────────────────────────
+// `hermes chat` prints its own messages on the same streams as the agent's
+// reply: the settings-upgrade banner on the first run after a Hermes upgrade,
+// and the chat-panel copy for a failed turn (hermes_cli/cli_chat_error_copy.py
+// and the cli.error strings in Hermes's locales/en.yaml). None of it is the
+// agent speaking. Posted as the agent's message, it stays in the conversation's
+// history, and later turns read it as something the agent said: a model that
+// sees "Hermes couldn't start the model connection" three times as its own
+// replies can decide every new reply repeats itself and answer HEARTBEAT_OK.
+const HERMES_RUNTIME_PATTERNS = [
+  // A refused session or a failed agent build.
+  { reason: "agent_init_failed", re: /Hermes couldn't start the model connection:[\s\S]*?a\s+different\s+provider\./g },
+  // A failed model request: one plain sentence, then a Details: line.
+  {
+    reason: "model_request_failed",
+    re: /(?:^|\n)[^\n]*(?:key was rejected\. Run `hermes model`|account is out of credit\.|isn't available on [^\n]*\. Run \/model|Rate limited by [^\n]*; wait a minute|blocked the request \(not your key\)|is overloaded right now\.|had an internal error\.|did not answer in time\.|The model request failed\.)[^\n]*\r?\nDetails: [^\n]*/g,
+  },
+  // A provider that never answered, after Hermes's retries.
+  { reason: "provider_unavailable", re: /(?:^|\n)[^\n]*didn't answer after \d+ attempts[^\n]*(?:\r?\nProvider said: [^\n]*)?/g },
+];
+// The settings-upgrade banner, recognized only with its closing
+// "Config version: <old> → <new>" line, so a reply that happens to start a line
+// with ✓ or → keeps it.
+const HERMES_UPGRADE_LINE_RE = /^[ \t]*(?:✓ (?:Migrated|Removed)\b|⚠ platform '|→ |Config version: \d+ → \d+)[^\n]*(?:\n|$)/gm;
+const HERMES_UPGRADE_END_RE = /^[ \t]*Config version: \d+ → \d+[ \t]*$/m;
+
+// Removes Hermes's own runtime text from a reply. Returns the rest, and the
+// reason of each kind removed (empty when the reply is all the agent's own).
+function stripHermesRuntimeText(text) {
+  let out = String(text ?? "");
+  const found = [];
+  if (HERMES_UPGRADE_END_RE.test(out)) {
+    out = out.replace(HERMES_UPGRADE_LINE_RE, "");
+    found.push("settings_upgrade_banner");
+  }
+  for (const { reason, re } of HERMES_RUNTIME_PATTERNS) {
+    const next = out.replace(re, "");
+    if (next !== out) found.push(reason);
+    out = next;
+  }
+  return { text: found.length ? out.trim() : out, found };
+}
+
+// ── A person waiting on the turn ────────────────────────────────────────────
+// A DM, or an @-mention by a person rather than by another agent. The prompt
+// already says such a turn must get a real reply; these are the turns where
+// silence leaves somebody waiting on nothing.
+function personWaits(trigger, packet, last) {
+  if (trigger === "dm") return true;
+  if (trigger !== "mention") return false;
+  return packet?.members?.[last?.memberId]?.kind !== "agent";
+}
+const isOnlyHeartbeat = (text) => /^\s*HEARTBEAT_OK\s*$/i.test(String(text ?? ""));
+// Appended to the prompt for the one rerun after a HEARTBEAT_OK to a waiting person.
+const WAITING_REMINDER = [
+  "REMINDER: a person is waiting on the message above, and HEARTBEAT_OK gives them nothing.",
+  "Write a real reply to their last message now, in one or two sentences, even if it is close to something said earlier in the conversation.",
+  "Do not answer HEARTBEAT_OK on this turn.",
+].join(" ");
+// Posted when the rerun gives nothing either, so the person is not left waiting.
+const NO_REPLY_NOTE = "_I couldn't put a reply together this time. Please try again in a moment._";
+
+// The messages a prompt shows as the conversation's history, without the
+// agent's own messages that are only Hermes's runtime text or the no-reply note.
+function historyMessages(messages, agentMemberId) {
+  return (Array.isArray(messages) ? messages : []).filter((m) => {
+    if (!agentMemberId || m?.memberId !== agentMemberId) return true;
+    const body = String(m.bodyMd ?? "");
+    if (body.trim() === NO_REPLY_NOTE) return false;
+    const { text, found } = stripHermesRuntimeText(body);
+    return !(found.length && !text.trim());
+  });
+}
+
+// One turn for a trigger, with the rerun for a waiting person. runOnce(prompt)
+// runs one turn and returns { exitError, rawText, runtimeFound }. When a person
+// waits and the reply is only HEARTBEAT_OK, the turn runs once more with
+// WAITING_REMINDER appended. The api waits HERMES_TIMEOUT + 60 s for the
+// bridge's reply (dispatchTimeoutMs in api/src/lib/config.ts), so the rerun
+// happens only when the first turn used under half of HERMES_TIMEOUT.
+//   silent: nothing to post (empty, or HEARTBEAT_OK after the rerun)
+//   note:   silent with a person waiting, so the no-reply note goes out
+async function turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs, now = Date.now }) {
+  const started = now();
+  let result = await runOnce(prompt);
+  let retried = false, reran = false;
+  if (waiting && isOnlyHeartbeat(result.rawText)) {
+    retried = true;
+    if (now() - started < timeoutMs / 2) {
+      reran = true;
+      result = await runOnce(`${prompt}\n\n${WAITING_REMINDER}`);
+    }
+  }
+  const silent = !String(result.rawText ?? "").trim() || (retried && isOnlyHeartbeat(result.rawText));
+  return { ...result, retried, reran, silent, note: Boolean(waiting) && silent };
+}
+
 function formatMsg(agent, m) {
   const who = m.memberId === agent.memberId ? "you" : `@${m.memberHandle}`;
   let rxStr = "";
@@ -1141,7 +1238,9 @@ function buildPrompt(entry, packet) {
     ].join("\n");
   }
 
-  const recent = (conv.messages || []).slice(-12);
+  // Hermes's runtime text and the no-reply note, posted as this agent's messages
+  // by earlier turns, are not something the agent said (historyMessages).
+  const recent = historyMessages(conv.messages, agent?.memberId).slice(-12);
   const history = recent.map((m) => formatMsg(agent, m)).join("\n");
   const last = recent[recent.length - 1];
   const lastSenderKind = last ? packet.members?.[last.memberId]?.kind : undefined;
@@ -1841,28 +1940,62 @@ function connect(entry) {
       const isOpenClaw = entry.kind === "openclaw" || typeof entry.openclawHome === "string";
       const modelOverride =
         MODEL_IMPORTANT && IMPORTANT_TRIGGERS.has(trigger) ? MODEL_IMPORTANT : undefined;
-      const { stdout, stderr, exitCode, signal } = isOpenClaw
-        ? await callOpenClaw(prompt, entry.openclawHome, entry.token)
-        : await callHermes(prompt, entry.hermesHome, entry.token, modelOverride);
-      // A container that exited non-zero (or was killed) did NOT have a clean
-      // turn, whatever text it managed to emit first: its supervision tree was
-      // torn down mid-flight, which on Hermes suspends any in-flight cron
-      // session and leaves it to be picked up — and interrupted again — on the
-      // next boot. Recording those runs as `ok` is what hid 207 consecutive
-      // dirty shutdowns. Every reply below carries it so the worker records the
-      // run as failed while still applying whatever the agent did manage.
-      const exitError = gatewayExitError(exitCode, signal);
-      if (exitError) {
-        console.error(`[${entry.handle}] ${trigger} → ${exitError} (reply kept, run marked failed)`);
-      }
-      const rawText = isOpenClaw
-        ? (extractOpenClawReply(stdout) || extractOpenClawReply(stderr) || "")
-        : (extractReply(stdout) || extractReply(stderr) || "");
-      // Hermes produced nothing usable (crash, SIGTERM, empty streams). Stay
-      // silent rather than posting "(empty reply)" as text — always safer.
-      if (!rawText.trim()) {
+      // One turn: the reply text, without Hermes's own runtime text
+      // (stripHermesRuntimeText), and the container's exit as a run error.
+      const runOnce = async (promptText) => {
+        const { stdout, stderr, exitCode, signal } = isOpenClaw
+          ? await callOpenClaw(promptText, entry.openclawHome, entry.token)
+          : await callHermes(promptText, entry.hermesHome, entry.token, modelOverride);
+        // A container that exited non-zero (or was killed) did NOT have a clean
+        // turn, whatever text it managed to emit first: its supervision tree was
+        // torn down mid-flight, which on Hermes suspends any in-flight cron
+        // session and leaves it to be picked up — and interrupted again — on the
+        // next boot. Recording those runs as `ok` is what hid 207 consecutive
+        // dirty shutdowns. Every reply below carries it so the worker records the
+        // run as failed while still applying whatever the agent did manage.
+        const exitError = gatewayExitError(exitCode, signal);
+        if (exitError) {
+          console.error(`[${entry.handle}] ${trigger} → ${exitError} (reply kept, run marked failed)`);
+        }
+        const raw = isOpenClaw
+          ? (extractOpenClawReply(stdout) || extractOpenClawReply(stderr) || "")
+          : (extractReply(stdout) || extractReply(stderr) || "");
+        const runtime = isOpenClaw ? { text: raw, found: [] } : stripHermesRuntimeText(raw);
+        if (runtime.found.length) {
+          console.warn(`[${entry.handle}] ${trigger} → Hermes's own text kept out of the conversation (${runtime.found.join(", ")})`);
+        }
+        return { exitError, rawText: runtime.text, runtimeFound: runtime.found };
+      };
+      // A person waits on a DM or a human @-mention: a HEARTBEAT_OK reruns the
+      // turn once with a reminder (turnForWaitingPerson).
+      const waiting = Boolean(conv) && personWaits(trigger, p, last);
+      const turn = await turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs: HERMES_TIMEOUT * 1000 });
+      const { exitError, rawText, runtimeFound, retried } = turn;
+      if (turn.reran) console.warn(`[${entry.handle}] ${trigger} → HEARTBEAT_OK while a person waits; ran the turn once more with a reminder`);
+      else if (retried) console.warn(`[${entry.handle}] ${trigger} → HEARTBEAT_OK while a person waits, too late for a rerun`);
+      const runtimeError = runtimeFound.length ? `hermes_runtime_text: ${runtimeFound.join(", ")}` : undefined;
+      // Nothing to post: a crash, empty streams, Hermes's runtime text alone,
+      // or HEARTBEAT_OK after the rerun. With a person waiting, a short note
+      // says so, rather than silence; Hermes's own text is never posted.
+      if (turn.silent) {
+        const error = exitError ?? runtimeError ?? (retried ? "no_reply_after_retry" : "empty_reply");
+        if (turn.note) {
+          console.log(`[${entry.handle}] ${trigger} → nothing to post for a waiting person (${error}); posting the no-reply note`);
+          return reply({
+            actions: [
+              {
+                type: "post_message",
+                conversation_id: conv.conversationId,
+                body_md: NO_REPLY_NOTE,
+                ...(replyTo ? { reply_to: replyTo } : {}),
+              },
+            ],
+            error,
+            trace: [`${entry.handle} gave no reply${turn.reran ? " after a rerun" : ""}; posted the no-reply note (${error})`],
+          });
+        }
         console.log(`[${entry.handle}] ${trigger} → skip (empty/crashed reply)`);
-        return reply({ status: "HEARTBEAT_OK", error: exitError ?? "empty_reply" });
+        return reply({ status: "HEARTBEAT_OK", error });
       }
       // Hermes hit its agent-loop cap: the reply is a forced summary, not real
       // work. Post whatever substantive remainder survives the noise strip,
@@ -1872,7 +2005,9 @@ function connect(entry) {
         ? { error: "runaway_max_iterations" }
         : exitError
           ? { error: exitError }
-          : {};
+          : runtimeError
+            ? { error: runtimeError }
+            : {};
       // Silence-allowed triggers: model is permitted to skip a post by returning
       // HEARTBEAT_OK. `mention` is here only for agent→agent mentions (the
       // prompt forbids it on human mentions, and the executor's reply-guard
@@ -2031,6 +2166,13 @@ function connect(entry) {
 export {
   buildHermesSpawn,
   hermesChatArgs,
+  stripHermesRuntimeText,
+  personWaits,
+  isOnlyHeartbeat,
+  turnForWaitingPerson,
+  historyMessages,
+  WAITING_REMINDER,
+  NO_REPLY_NOTE,
   buildPrompt,
   extractActions,
   extractAttachments,
