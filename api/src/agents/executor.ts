@@ -16,6 +16,7 @@ import { audit } from "../lib/audit.js";
 import { id } from "../lib/ids.js";
 import { publishToConversation, publishToWorkspace } from "../lib/events.js";
 import { checkReplyBody, guardRejectHint, sanitizeAgentProse } from "./reply-guard.js";
+import { NO_REPLY_NOTE } from "./waiting.js";
 import { contentTypeForName } from "../lib/content-type.js";
 import { checkRecentDuplicate, checkRecentDuplicateTaskComment } from "./dedupe.js";
 import {
@@ -191,6 +192,41 @@ export interface ExecOutcome {
   actionsApplied: number;
   errors: string[];
   trace: string[];
+  // Each reply the agent meant for a conversation that was not posted, with the
+  // reason and never the text. Recorded in the run's result_json, so a host can
+  // tell an operator (see DroppedReply).
+  dropped?: DroppedReply[];
+  // The conversations a post reached during this run. Internal to applyActions.
+  posted?: Set<string>;
+}
+
+// A reply that could not be used: where it was meant to go, and why.
+export interface DroppedReply {
+  conversationId: string | null;
+  reason: string;
+}
+
+// What applyOne knows about the run beyond the action itself. `waitingIn` is the
+// conversation where a person waits on this turn (a DM, or a person's
+// @-mention): a short reply there is allowed, and a reply that cannot be posted
+// is replaced with the no-reply note (waiting.ts).
+interface ApplyCtx {
+  waitingIn?: string | null;
+}
+
+const recordDrop = (out: ExecOutcome, conversationId: string | null, reason: string) => {
+  (out.dropped ??= []).push({ conversationId, reason });
+};
+
+// The no-reply note goes to the conversation where a person waits when a reply
+// meant for it was dropped and no other post of the run reached it.
+export function needsNoReplyNote(
+  waitingIn: string | null | undefined,
+  dropped: DroppedReply[] | undefined,
+  posted: Set<string> | undefined,
+): boolean {
+  if (!waitingIn) return false;
+  return Boolean(dropped?.some((d) => d.conversationId === waitingIn)) && !posted?.has(waitingIn);
 }
 
 // Executor-performed actions that are safe to AUTO-REPLAY when their gated
@@ -583,9 +619,13 @@ export async function applyActions(params: {
   runId: string;
   actions: AgentAction[];
   triggerConversationId?: string | null;
+  // A person waits on this turn in the trigger conversation (personWaits in
+  // waiting.ts): a DM, or a person's @-mention.
+  waiting?: boolean;
 }): Promise<ExecOutcome> {
   const { agentId, runId } = params;
   const out: ExecOutcome = { actionsApplied: 0, errors: [], trace: [] };
+  const ctx: ApplyCtx = { waitingIn: params.waiting ? (params.triggerConversationId ?? null) : null };
 
   const [agentMember] = await db
     .select()
@@ -684,7 +724,7 @@ export async function applyActions(params: {
             .set({ status: "applied" })
             .where(eq(approvals.id, granted.id));
           out.trace.push(`gated ${a.type} allowed by approval ${granted.id} (consumed)`);
-          await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out));
+          await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out, ctx));
           continue;
         }
         const opened = await openApproval({
@@ -709,7 +749,7 @@ export async function applyActions(params: {
           // Policy says this scope needs no human: run it now, leave the
           // audit row (status applied) so the decision is reviewable later.
           out.trace.push(`gated ${a.type} auto-approved by ${opened.rule} (approval ${opened.id}, audited)`);
-          await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out));
+          await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out, ctx));
           continue;
         }
         const apId = opened.id;
@@ -718,11 +758,23 @@ export async function applyActions(params: {
         out.errors.push(`${a.type} ${why} — opened approval ${apId}`);
         continue;
       }
-      await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out));
+      await applyCounted(out, () => applyOne(agentId, runId, agentMember.id, a, out, ctx));
     } catch (e) {
       out.errors.push(`${a.type}: ${(e as Error).message}`);
     }
   }
+  // A person waits, and no reply of the agent's reached them: a short note says
+  // so, rather than silence. The dropped reply stays recorded for the operator.
+  const waitingIn = ctx.waitingIn;
+  if (waitingIn && needsNoReplyNote(waitingIn, out.dropped, out.posted)) {
+    try {
+      await applyOne(agentId, runId, agentMember.id, { type: "post_message", conversation_id: waitingIn, body_md: NO_REPLY_NOTE }, out, ctx);
+      out.trace.push("posted the no-reply note: the reply could not be used, and a person is waiting");
+    } catch (e) {
+      out.errors.push(`no-reply note: ${(e as Error).message}`);
+    }
+  }
+  delete out.posted;
   return out;
 }
 
@@ -732,20 +784,26 @@ async function applyOne(
   agentMemberId: string,
   a: AgentAction,
   out: ExecOutcome,
+  ctx: ApplyCtx = {},
 ): Promise<void> {
   switch (a.type) {
     case "post_message": {
       const hasAttachments = Array.isArray(a.attachments) && a.attachments.length > 0;
-      const guard = checkReplyBody(a.body_md, { hasAttachments });
+      // A person waiting in this conversation may get a short reply, such as a
+      // greeting. A post nobody asked for keeps the length floor.
+      const allowShort = Boolean(ctx.waitingIn) && a.conversation_id === ctx.waitingIn;
+      const guard = checkReplyBody(a.body_md, { hasAttachments, allowShort });
       if (!guard.ok) {
         out.trace.push(`post_message rejected (${guard.reason})`);
         out.errors.push(
           `post_message rejected: ${guard.reason}.${guardRejectHint(guard.reason)}`,
         );
+        recordDrop(out, a.conversation_id ?? null, guard.reason);
         return;
       }
       const dup = await checkRecentDuplicate(a.conversation_id, guard.bodyMd, agentMemberId);
       if (!dup.ok) {
+        recordDrop(out, a.conversation_id ?? null, "duplicate_of_recent");
         out.trace.push(
           `post_message rejected (duplicate_of_recent vs ${dup.againstId} @${dup.score})`,
         );
@@ -853,6 +911,7 @@ async function applyOne(
         }).catch(() => {});
       }
       out.trace.push(`post_message ${mid} in ${a.conversation_id}`);
+      (out.posted ??= new Set()).add(a.conversation_id);
       return;
     }
     case "react": {

@@ -883,7 +883,7 @@ export function guardRejectHint(reason: string): string {
 
 export function checkReplyBody(
   bodyMd: string,
-  opts?: { hasAttachments?: boolean },
+  opts?: { hasAttachments?: boolean; allowShort?: boolean },
 ): GuardResult {
   // Strip leaked runtime scaffolding (runaway-iterations banner, tool-dispatch
   // failure paragraphs, sign-offs) FIRST so a reply with a substantive body
@@ -947,9 +947,11 @@ export function checkReplyBody(
   // Junk floor. Checked against the SANITIZED body: what a reader would end up
   // seeing is what has to clear the bar, and a body that is only machinery has
   // already been rejected above.
+  // A person waiting on a DM or an @-mention may get a short reply, such as
+  // "Hello! 👋" (allowShort). Every other post keeps the floor.
   if (!opts?.hasAttachments) {
     if (isEmojiOnly(prose.text)) return { ok: false, reason: "emoji_only" };
-    if (prose.text.trim().length < MIN_AGENT_BODY_CHARS) {
+    if (!opts?.allowShort && prose.text.trim().length < MIN_AGENT_BODY_CHARS) {
       return { ok: false, reason: "too_short" };
     }
   }

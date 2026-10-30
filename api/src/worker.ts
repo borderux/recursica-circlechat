@@ -20,7 +20,8 @@ import { buildContext } from "./agents/context.js";
 import { runTaskContext } from "./lib/cloud-models.js";
 import { runTaskId } from "./lib/cloud-models-rules.js";
 import { callAgent } from "./agents/adapters/dispatch.js";
-import { applyActions, type AgentAction } from "./agents/executor.js";
+import { applyActions, type AgentAction, type DroppedReply } from "./agents/executor.js";
+import { personWaits } from "./agents/waiting.js";
 import {
   materialiseScheduledRun,
   cancelAgentHeartbeat,
@@ -486,7 +487,15 @@ const worker = new Worker<AgentJobPayload>(
       runId,
       actions,
       triggerConversationId: payload.conversationId ?? null,
+      waiting: personWaits(payload.trigger, packet),
     });
+    // Each reply that could not be used, from the bridge (a turn with nothing
+    // usable) and from the executor (a post the guard refused): where it was
+    // meant to go and why, never the text. A host reads these from result_json.
+    const dropped: DroppedReply[] = [
+      ...(response !== "HEARTBEAT_OK" && Array.isArray(response.dropped) ? response.dropped : []),
+      ...(outcome.dropped ?? []),
+    ];
 
     const completionChars =
       response === "HEARTBEAT_OK"
@@ -569,6 +578,7 @@ const worker = new Worker<AgentJobPayload>(
         resultJson: {
           applied: outcome.actionsApplied,
           errors: redactLines(outcome.errors),
+          ...(dropped.length ? { dropped } : {}),
           ...(cls.status === "ok" && !cls.productive ? { idle: true } : {}),
         },
         traceJson: redactLines([...trace, ...outcome.trace]),

@@ -56,9 +56,23 @@ export async function callHermesSocket(params: {
   // A bridge that skipped because the runtime produced nothing may say so via
   // `error` (e.g. {status:"HEARTBEAT_OK", error:"empty_reply"}); surface it
   // rather than folding it into a healthy idle beat.
-  if (reply.status === "HEARTBEAT_OK") return error ? { actions: [], error } : "HEARTBEAT_OK";
+  const dropped = droppedFrom(reply.dropped);
+  const extra = { ...(error ? { error } : {}), ...(dropped.length ? { dropped } : {}) };
+  if (reply.status === "HEARTBEAT_OK") return error || dropped.length ? { actions: [], ...extra } : "HEARTBEAT_OK";
   if (Array.isArray(reply.actions)) {
-    return { actions: reply.actions, trace: reply.trace, usage: reply.usage, ...(error ? { error } : {}) };
+    return { actions: reply.actions, trace: reply.trace, usage: reply.usage, ...extra };
   }
-  return error ? { actions: [], error } : { actions: [] };
+  return { actions: [], ...extra };
+}
+
+// The bridge's record of each reply it could not use: a conversation id and a
+// short reason code, and nothing else, so no text of the reply rides along.
+export function droppedFrom(value: unknown): Array<{ conversationId: string | null; reason: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 10).flatMap((d) => {
+    const reason = typeof d?.reason === "string" ? d.reason.replace(/[^a-z0-9_:, -]/gi, "").slice(0, 80) : "";
+    if (!reason) return [];
+    const conversationId = typeof d?.conversation_id === "string" ? d.conversation_id.slice(0, 64) : null;
+    return [{ conversationId, reason }];
+  });
 }

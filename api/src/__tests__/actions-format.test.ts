@@ -35,9 +35,11 @@ describe("an <actions> block with a small format slip", () => {
     const { body, actions } = read(LIVE_REPLY);
     expect(body).toBe("Hello! 👋");
     expect(actions).toEqual([{ type: "react", message_id: "m_gopm9ffobkrn4aqn47gb", emoji: "👋" }]);
-    // The post is no longer refused for a visible actions block.
+    // The post is no longer refused for a visible actions block. The reply came on a person's
+    // @-mention, where a short reply is allowed, so it posts.
     const guard = checkReplyBody(body);
     if (!guard.ok) expect(guard.reason).not.toBe("actions_block_visible");
+    expect(checkReplyBody(body, { allowShort: true })).toMatchObject({ ok: true, bodyMd: "Hello! 👋" });
   });
 
   it("an array still works as before", () => {

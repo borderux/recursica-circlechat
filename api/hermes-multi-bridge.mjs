@@ -2031,11 +2031,20 @@ function connect(entry) {
               },
             ],
             error,
+            // The reply that could not be used, for the host's notifier: where
+            // and why, never the text.
+            dropped: [{ conversation_id: conv.conversationId, reason: error }],
             trace: [`${entry.handle} gave no reply${turn.reran ? " after a rerun" : ""}; posted the no-reply note (${error})`],
           });
         }
         console.log(`[${entry.handle}] ${trigger} → skip (empty/crashed reply)`);
-        return reply({ status: "HEARTBEAT_OK", error });
+        // A background turn may stay silent. A turn that held only Hermes's
+        // runtime text had a reply nobody will see, so it is recorded.
+        return reply({
+          status: "HEARTBEAT_OK",
+          error,
+          ...(runtimeError && conv ? { dropped: [{ conversation_id: conv.conversationId, reason: "hermes_runtime_text" }] } : {}),
+        });
       }
       // Hermes hit its agent-loop cap: the reply is a forced summary, not real
       // work. Post whatever substantive remainder survives the noise strip,
