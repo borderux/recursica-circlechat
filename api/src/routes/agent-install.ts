@@ -23,10 +23,11 @@ import {
   restoreQuarantinedSkills,
 } from "../agents/hermes-equip.js";
 import { resolveDefaultModel } from "../lib/provider-defaults.js";
-import { HERMES_RUNTIME, buildHermesCommand } from "../agents/hermes-runtime.js";
+import { buildHermesCommand } from "../agents/hermes-runtime.js";
 import { buildOpenClawCommand } from "../agents/openclaw-runtime.js";
 import { equipOpenClawAgent } from "../agents/openclaw-equip.js";
 import { normalizeAgentBrief } from "../lib/agent-brief.js";
+import { createAgentHome } from "../agents/home-files.js";
 
 // Where Hermes per-agent homes live and where the multi-bridge reads its
 // connection list. Both are overridable for dev.
@@ -143,14 +144,9 @@ export default async function agentInstallRoutes(app: FastifyInstance): Promise<
       // Expected: not found.
     }
 
-    await fs.mkdir(hermesHome, { recursive: true });
-    // Under docker, the container runs with its own `hermes` user (uid 10000)
-    // and the entrypoint needs write access to the mounted HERMES_HOME. Give
-    // the dir open permissions so both root and the hermes user inside the
-    // container can bootstrap it without a chown dance.
-    if (HERMES_RUNTIME === "docker") {
-      try { await fs.chmod(hermesHome, 0o777); } catch { /* ignore */ }
-    }
+    // Mode 0700. Under docker, the image's start-up gives the home to its own
+    // `hermes` user (uid 10000) before Hermes runs (createAgentHome).
+    await createAgentHome(hermesHome);
 
     const isFreeApi = body.provider === "custom:freeapi";
     if (isFreeApi && !body.apiBaseUrl) {
@@ -376,10 +372,9 @@ export default async function agentInstallRoutes(app: FastifyInstance): Promise<
       /* Expected: not found. */
     }
 
-    await fs.mkdir(openclawHome, { recursive: true });
-    // Container runs as root (0:0) so it can create files under /root/.openclaw;
-    // open perms so the host-side `fs.copyFile` for the MCP script also works.
-    try { await fs.chmod(openclawHome, 0o777); } catch { /* ignore */ }
+    // Mode 0700. The container runs as root (0:0), so it can create files under
+    // /root/.openclaw, and so does the api's `fs.copyFile` of the MCP script.
+    await createAgentHome(openclawHome);
 
     const isFreeApi = body.provider === "custom:freeapi";
     if (isFreeApi && !body.apiBaseUrl) {
