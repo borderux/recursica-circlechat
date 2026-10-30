@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
+import { lazy } from "./lazy.js";
 import { id } from "./ids.js";
 
 export const WORKFLOW_QUEUE = "workflow-runs";
@@ -10,7 +11,8 @@ export interface WorkflowJobPayload {
   resumeStepId?: string;
 }
 
-export const workflowQueue = new Queue<WorkflowJobPayload>(WORKFLOW_QUEUE, {
+// Built on first use (lazy.ts): building a Queue connects Redis at once.
+export const workflowQueue = lazy(() => new Queue<WorkflowJobPayload>(WORKFLOW_QUEUE, {
   connection: redis,
   defaultJobOptions: {
     attempts: 5,
@@ -18,7 +20,7 @@ export const workflowQueue = new Queue<WorkflowJobPayload>(WORKFLOW_QUEUE, {
     removeOnComplete: 1_000,
     removeOnFail: 1_000,
   },
-});
+}));
 
 export async function enqueueWorkflowRun(
   runId: string,
