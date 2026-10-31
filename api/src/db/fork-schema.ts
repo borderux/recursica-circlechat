@@ -23,3 +23,17 @@ export const workspaceCloudModelPolicy = pgTable("workspace_cloud_model_policy",
   updatedBy: varchar("updated_by", { length: 32 }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+// A pending request to move a task off Cluster only (see
+// lib/cloud-model-requests.ts). One row per task at most; an answer deletes
+// the row.
+export const taskCloudModelRequests = pgTable("task_cloud_model_requests", {
+  id: varchar("id", { length: 32 }).primaryKey(),
+  taskId: varchar("task_id", { length: 32 }).notNull().unique(),
+  workspaceId: varchar("workspace_id", { length: 32 }).notNull(),
+  mode: varchar("mode", { length: 20 }).notNull(),
+  maxStartWaitMinutes: integer("max_start_wait_minutes"),
+  maxFinishMinutes: integer("max_finish_minutes"),
+  requestedBy: varchar("requested_by", { length: 32 }).notNull(),
+  requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
+});

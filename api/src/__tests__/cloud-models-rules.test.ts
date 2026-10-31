@@ -1,9 +1,17 @@
 import { describe, it, expect } from "vitest";
 import {
+  CloudModelsAnswerBody,
   CloudModelsBody,
   DEFAULT_CLOUD_MODELS,
   MAX_CLOUD_WAIT_MINUTES,
+  answerComment,
+  approvalToken,
   canChangeCloudModels,
+  cloudApprovers,
+  cloudModelsAccess,
+  describeCloudModels,
+  isCloudApprover,
+  needsApproval,
   rowFromSetting,
   runTaskId,
   sameSetting,
@@ -115,5 +123,66 @@ describe("the task a run works on", () => {
     expect(taskIdFromWorkflowInput({ taskId: 42 })).toBeNull();
     expect(taskIdFromWorkflowInput({ taskId: "  " })).toBeNull();
     expect(taskIdFromWorkflowInput(null)).toBeNull();
+  });
+});
+
+describe("approvals", () => {
+  const MEMBER = ["workspace.read", "workspace.write"];
+
+  it("reads the approver list from CLOUD_APPROVERS, ignoring case and blanks", () => {
+    const list = cloudApprovers({ CLOUD_APPROVERS: " One@Example.com,, two@example.com " });
+    expect(list).toEqual(["one@example.com", "two@example.com"]);
+    expect(isCloudApprover("ONE@example.com", list)).toBe(true);
+    expect(isCloudApprover("three@example.com", list)).toBe(false);
+    expect(isCloudApprover(null, list)).toBe(false);
+    expect(cloudApprovers({})).toEqual([]);
+  });
+
+  it("only a move off Cluster only needs approval", () => {
+    expect(needsApproval({ mode: "cluster_only" })).toBe(false);
+    expect(needsApproval({ mode: "cloud_now" })).toBe(true);
+    expect(needsApproval({ mode: "cloud_after_wait", maxStartWaitMinutes: 1, maxFinishMinutes: 1 })).toBe(true);
+  });
+
+  it("an approver needs a seat that can write, and is never a spectator", () => {
+    const approvers = ["pat@example.com"];
+    const base = { membersCanChange: false, email: "pat@example.com", approvers };
+    expect(cloudModelsAccess({ ...base, permissions: MEMBER })).toEqual({ canEdit: true, isApprover: true });
+    expect(cloudModelsAccess({ ...base, permissions: ["*"] })).toEqual({ canEdit: true, isApprover: true });
+    expect(cloudModelsAccess({ ...base, permissions: ["workspace.read"] })).toEqual({ canEdit: false, isApprover: false });
+    expect(cloudModelsAccess({ ...base, permissions: ["*"], spectator: true })).toEqual({ canEdit: false, isApprover: false });
+  });
+
+  it("everyone else keeps the old rule for who can edit, and is not an approver", () => {
+    const base = { email: "sam@example.com", approvers: ["pat@example.com"] };
+    expect(cloudModelsAccess({ ...base, permissions: ["*"], membersCanChange: false })).toEqual({ canEdit: true, isApprover: false });
+    expect(cloudModelsAccess({ ...base, permissions: MEMBER, membersCanChange: false })).toEqual({ canEdit: false, isApprover: false });
+    expect(cloudModelsAccess({ ...base, permissions: MEMBER, membersCanChange: true })).toEqual({ canEdit: true, isApprover: false });
+  });
+
+  it("turns the service API on only with a token of 32 characters or more", () => {
+    expect(approvalToken({})).toBeNull();
+    expect(approvalToken({ CLOUD_APPROVAL_TOKEN: "x".repeat(31) })).toBeNull();
+    expect(approvalToken({ CLOUD_APPROVAL_TOKEN: ` ${"x".repeat(32)} ` })).toBe("x".repeat(32));
+  });
+
+  it("takes an answer with a decision, an approver's email and an optional note", () => {
+    expect(CloudModelsAnswerBody.parse({ decision: "deny", approverEmail: " pat@example.com " })).toEqual({
+      decision: "deny",
+      approverEmail: "pat@example.com",
+    });
+    expect(() => CloudModelsAnswerBody.parse({ decision: "approve", approverEmail: "not-an-email" })).toThrow();
+    expect(() => CloudModelsAnswerBody.parse({ decision: "approve", approverEmail: "pat@example.com", by: "agent" })).toThrow();
+  });
+
+  it("writes the answer's comment", () => {
+    const requested = { mode: "cloud_after_wait" as const, maxStartWaitMinutes: 15, maxFinishMinutes: 120 };
+    expect(describeCloudModels(requested)).toBe("Cloud after a wait (start within 15 min, finish within 120 min)");
+    expect(answerComment({ decision: "approve", requesterName: "Sam", requested, current: requested })).toBe(
+      "Approved the Cloud models request from Sam. The task now uses Cloud after a wait (start within 15 min, finish within 120 min).",
+    );
+    expect(
+      answerComment({ decision: "deny", requesterName: "Sam", requested: { mode: "cloud_now" }, current: { mode: "cluster_only" }, note: "Not this week." }),
+    ).toBe("Denied the Cloud models request from Sam for Cloud now. The task stays on Cluster only.\n\nNote: Not this week.");
   });
 });

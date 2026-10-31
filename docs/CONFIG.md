@@ -77,6 +77,57 @@ once you trust the outputs; give a proven agent `approve:*`. Keep credential
 asks human-only and answer them once — a denial with a note ("use the built-in
 app preview instead of Vercel") is remembered and stops the re-asking loop.
 
+### Cloud models approvals
+
+Each task has a Cloud models setting: Cluster only (the default), Cloud
+after a wait, or Cloud now. Only approvers move a task off Cluster only
+directly. Anyone else who can change the setting gets a dialog, and can send
+a request to the approvers. A request leaves the setting unchanged, and marks
+the task with the pending request. The request records who asked, the
+setting asked for, and the time. A new request on the same task replaces the
+pending one. Moving a task back to Cluster only never needs approval. Agents
+can read the setting, and can't change the setting, make a request or answer one.
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `CLOUD_APPROVERS` | _empty_ | Comma-separated emails of the approvers. An approver also needs a seat that can write to the workspace, such as the built-in `member` or `admin` role. With an empty list, every move off Cluster only goes through a request, even for admins. |
+| `CLOUD_APPROVAL_TOKEN` | _empty_ | The service token for the API that answers requests. A token under 32 characters counts as unset, and the API answers `404`. Give the token only to the tool that forwards requests, never to an agent. |
+| `CLOUD_REQUEST_WEBHOOK_URL` | _empty_ | Gets a `POST` for each new request, so another tool can forward the request to the approvers. A failed `POST` is tried again twice. Empty means no webhook. |
+| `CLOUD_REQUEST_WEBHOOK_SECRET` | _empty_ | Signs the webhook's `POST`, the same way as the workflow webhooks: `x-circlechat-signature` is `sha256=` plus the HMAC of `"<x-circlechat-timestamp>.<body>"`. |
+
+The webhook's body has the event type, the request, the task and the path
+that answers the request:
+
+```json
+{
+  "type": "cloud_models.request.created",
+  "request": {
+    "id": "cmreq_…",
+    "setting": { "mode": "cloud_after_wait", "maxStartWaitMinutes": 15, "maxFinishMinutes": 120 },
+    "requestedBy": { "memberId": "m_…", "name": "…", "email": "…" },
+    "requestedAt": "2026-10-31T17:00:00.000Z"
+  },
+  "task": { "id": "task_…", "workspaceId": "ws_…", "title": "…", "url": "https://…/board?task=task_…" },
+  "answer": { "method": "POST", "path": "/api/cloud-models/requests/cmreq_…/answer" }
+}
+```
+
+To answer a request, the tool sends the token and the approver's email:
+
+```
+POST /api/cloud-models/requests/<request id>/answer
+Authorization: Bearer <CLOUD_APPROVAL_TOKEN>
+{ "decision": "approve" | "deny", "approverEmail": "…", "note": "optional" }
+```
+
+The email must be on `CLOUD_APPROVERS` (`403 not_an_approver` otherwise). The
+email must also belong to a member of the task's workspace, because the
+answer's comment is posted as that member (`403 approver_not_in_workspace`).
+An approval applies the setting asked for. A denial leaves the setting
+unchanged. Each answer posts a comment on the task, mentions the person who asked,
+and clears the pending request. A request that was answered or replaced
+answers `404 request_not_found`.
+
 ---
 
 ## Goals: planning, stall detection & re-plan
