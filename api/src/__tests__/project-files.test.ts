@@ -452,6 +452,8 @@ describe("rolling compaction", () => {
 
   it("writes archived entries to <project>/archive/<file> on disk and keeps them out of the index", async () => {
     const mount = join(tmpdir(), `cc-proj-archive-${process.pid}-${Date.now()}`);
+    // The workspace is a mount: the writes never create it.
+    await fsp.mkdir(mount);
     process.env.CC_WORKSPACE_MOUNT = mount;
     try {
       for (let i = 0; i < KEEP_ENTRIES + 2; i++) {

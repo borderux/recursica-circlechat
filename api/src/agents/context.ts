@@ -26,6 +26,7 @@ import { ensureAndLoadBlocks } from "../lib/memory-blocks.js";
 import { loadTaskSummary, maybeSummarizeTaskThread } from "../lib/task-condenser.js";
 import { latestVerdictSummary } from "../lib/task-verifier.js";
 import { buildProjectContext } from "../lib/project-files.js";
+import { readWorkspaceText, workspaceRoot } from "../lib/workspace-read.js";
 import { approvalExpiresAt } from "../lib/approval-policy.js";
 import type { CloudModelsSetting } from "../lib/cloud-models-rules.js";
 
@@ -73,6 +74,8 @@ export interface ContextPacket {
     model: string;
     scopes: string[];
     brief: string;
+    // Deliverables only: documents go to a task as files, chat gets a summary.
+    deliverablesOnly: boolean;
   };
   // Workspace-level context shared by every agent in this workspace.
   // The mission is injected into the runtime prompt so all agents agree on
@@ -1000,6 +1003,7 @@ export async function buildContext(opts: {
       model: a.model,
       scopes: a.scopes,
       brief: a.brief,
+      deliverablesOnly: (a.configJson as Record<string, unknown> | null)?.deliverablesOnly === true,
     },
     workspace: {
       id: ws.id,
@@ -1066,7 +1070,10 @@ export async function buildContext(opts: {
 // The shared workspace mount inside the api/worker container (same host dir the
 // agent containers see at /workspace). Configurable for non-standard deploys;
 // every read is fail-safe so a missing mount just yields empty brief/manifest.
-const WORKSPACE_MOUNT = process.env.CC_WORKSPACE_MOUNT || "/workspace";
+const WORKSPACE_MOUNT = workspaceRoot();
+// A file the prompt reads from the workspace is read only up to this size (see
+// lib/workspace-read.ts: regular files only, never through a link).
+const WORKSPACE_TEXT_MAX_BYTES = 256 * 1024;
 const BRIEF_MAX_CHARS = 6000;
 const MANIFEST_MAX_ENTRIES = 80;
 const MANIFEST_SKIP = /(^|\/)(node_modules|\.venv|\.git|__pycache__)(\/|$)/;
@@ -1075,9 +1082,7 @@ const MANIFEST_SKIP = /(^|\/)(node_modules|\.venv|\.git|__pycache__)(\/|$)/;
 // steers the team on their next wake with no redeploy.
 async function readWorkspaceBrief(): Promise<string> {
   try {
-    const { promises: fsp } = await import("node:fs");
-    const { join } = await import("node:path");
-    const buf = await fsp.readFile(join(WORKSPACE_MOUNT, "BRIEF.md"), "utf8");
+    const buf = await readWorkspaceText(`${WORKSPACE_MOUNT}/BRIEF.md`, WORKSPACE_TEXT_MAX_BYTES, WORKSPACE_MOUNT);
     return buf.length > BRIEF_MAX_CHARS ? buf.slice(0, BRIEF_MAX_CHARS) + "\n…(brief truncated)" : buf;
   } catch {
     return "";
@@ -1169,7 +1174,7 @@ async function readWorkspaceKnowledge(
       .slice(0, 30);
     const parsed: Array<{ name: string; triggers: string[]; always: boolean; body: string }> = [];
     for (const name of files) {
-      const raw = await fsp.readFile(join(dir, name), "utf8").catch(() => "");
+      const raw = await readWorkspaceText(join(dir, name), WORKSPACE_TEXT_MAX_BYTES, WORKSPACE_MOUNT);
       if (!raw.trim()) continue;
       const { triggers, always, body } = parseKnowledgeFrontmatter(raw);
       if (body) parsed.push({ name, triggers, always, body });
@@ -1198,8 +1203,8 @@ async function readWorkspaceManifest(): Promise<Array<{ path: string; size: numb
         if (e.isDirectory()) {
           await walk(abs, depth + 1);
         } else if (e.isFile()) {
-          const st = await fsp.stat(abs).catch(() => null);
-          if (st) collected.push({ path: rel, size: st.size, mtime: st.mtimeMs });
+          const st = await fsp.lstat(abs).catch(() => null);
+          if (st?.isFile()) collected.push({ path: rel, size: st.size, mtime: st.mtimeMs });
         }
       }
     }

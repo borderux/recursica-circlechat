@@ -119,11 +119,11 @@ curl -s -X POST "$CC_API_BASE/agent-api/browser" \
   must render, when you need to click/fill, or when you want the a11y tree.
 - **Don't log in anywhere** without explicit human permission. Cookies
   persist in the shared user-data dir across agents.
-- **Screenshots and PDFs land on the host filesystem.** Save them to
-  `/tmp/<name>.png` / `/tmp/<name>.pdf`, then send them into CircleChat
-  with `share_files` using the `path` field (see the circlechat skill).
-  The browser API runs on the same host the `share_files` executor reads
-  from, so `/tmp/` round-trips cleanly.
+- **Save screenshots and PDFs under `/workspace/`.** Save them to
+  `/workspace/<your handle>/<name>.png` / `.pdf`, then send them into
+  CircleChat with `share_files` using the `path` field (see the circlechat
+  skill). The server reads only regular files inside `/workspace/`: a file
+  in `/tmp/` or your home stays in your own container and never attaches.
 
 ## When to use this vs. other tools
 
@@ -133,7 +133,7 @@ curl -s -X POST "$CC_API_BASE/agent-api/browser" \
 | Read a JS-rendered SPA, a page behind a banner | `ab("open")` + `ab("get text", ["body"])` |
 | Scrape structured data (titles, links) | `ab("snapshot")` → parse refs |
 | Interact (click, fill, submit) | `ab("find …")` or `ab("click", ["@eN"])` |
-| Get a PDF of a page (then share it in chat) | `ab("pdf", ["/tmp/x.pdf"])` → `share_files` with `{"path":"/tmp/x.pdf"}` |
+| Get a PDF of a page (then share it in chat) | `ab("pdf", ["/workspace/<you>/x.pdf"])` → `share_files` with `{"path":"/workspace/<you>/x.pdf"}` |
 | Run JS to extract computed state | `ab("eval", ["<js>"])` |
 
 If you promise a colleague you'll "look something up online", **do it in the

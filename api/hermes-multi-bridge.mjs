@@ -754,8 +754,12 @@ function leadOf(text, max) {
 // runaway summary doesn't become a runaway comment).
 const CHAT_BODY_MAX = 2000;
 const CHAT_POINTER_MAX = 400;
+// A deliverables-only agent's chat summary (SUMMARY_MAX in api/src/agents/long-reply.ts).
+const SUMMARY_MAX = 600;
 const TASK_BODY_MAX = 6000;
-const RAW_REPLY_MAX = 12000;
+// Only a runaway guard: a long reply is kept whole and attached as a file by the
+// api, so this sits far above any real reply (a 30-minute transcript is ~40k).
+const RAW_REPLY_MAX = 200_000;
 
 // Final safety net before posting: after <actions>/<attachments> have been
 // pulled out, is the remaining body nothing but machinery (tool-call syntax,
@@ -1078,6 +1082,41 @@ const WAITING_REMINDER = [
   "Write a real reply to their last message now, in one or two sentences, even if it is close to something said earlier in the conversation.",
   "Do not answer HEARTBEAT_OK on this turn.",
 ].join(" ");
+// Appended to the prompt for the one rerun after a reply that was a tool call
+// written out as text.
+const TOOL_CALL_REMINDER = [
+  "REMINDER: your last reply was a tool call written out as text (JSON or code), so nothing ran and nothing was posted.",
+  "Call the tool itself through tool calling (write_file, terminal, execute_code), never by writing its arguments into your reply.",
+  "Then reply in plain prose about what the tool did.",
+].join(" ");
+
+// A reply that is a tool call the model wrote as text instead of calling the
+// tool: one JSON object or array (fenced or not), a body that opens like a
+// tool's arguments ({"code": …, {"command": …), or gpt-oss's own tool-call
+// markup. Observed from gpt-oss: the whole reply was {"code": "import os, …"},
+// the script that should have written the files. Such a reply is never posted.
+const TOOL_ARGS_OPEN_RE = /^\s*(?:```(?:json)?\s*)?\{\s*"(?:code|command|cmd|path|file_path|content|script|query|input)"\s*:/;
+const HARMONY_MARKUP_RE = /<\|(?:start|channel|message|call|constrain|end|return)\|>|\bto=functions\.[A-Za-z_]/;
+function looksLikeTextToolCall(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (TOOL_ARGS_OPEN_RE.test(t) || HARMONY_MARKUP_RE.test(t)) return true;
+  const bare = t.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+  if (!/^[[{]/.test(bare)) return false;
+  try {
+    JSON.parse(bare);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The part of a raw reply that would be posted: without its <actions> and
+// <attachments> blocks.
+function replyBody(rawText) {
+  return extractAttachments(extractActions(String(rawText ?? "")).body).body;
+}
+
 // Posted when the rerun gives nothing either, so the person is not left waiting.
 const NO_REPLY_NOTE = "_I couldn't put a reply together this time. Please try again in a moment._";
 
@@ -1093,13 +1132,15 @@ function historyMessages(messages, agentMemberId) {
   });
 }
 
-// One turn for a trigger, with the rerun for a waiting person. runOnce(prompt)
-// runs one turn and returns { exitError, rawText, runtimeFound }. When a person
-// waits and the reply is only HEARTBEAT_OK, the turn runs once more with
-// WAITING_REMINDER appended. The api waits HERMES_TIMEOUT + 60 s for the
+// One turn for a trigger, with one rerun. runOnce(prompt) runs one turn and
+// returns { exitError, rawText, runtimeFound }. When a person waits and the
+// reply is only HEARTBEAT_OK, the turn runs once more with WAITING_REMINDER
+// appended. When the reply is a tool call written as text, it runs once more
+// with TOOL_CALL_REMINDER, and a second one is dropped (toolCallAsText). The api waits HERMES_TIMEOUT + 60 s for the
 // bridge's reply (dispatchTimeoutMs in api/src/lib/config.ts), so the rerun
 // happens only when the first turn used under half of HERMES_TIMEOUT.
-//   silent: nothing to post (empty, or HEARTBEAT_OK after the rerun)
+//   silent: nothing to post (empty, HEARTBEAT_OK after the rerun, or a tool
+//           call as text after the rerun)
 //   note:   silent with a person waiting, so the no-reply note goes out
 async function turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs, now = Date.now }) {
   const started = now();
@@ -1112,8 +1153,17 @@ async function turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs, now =
       result = await runOnce(`${prompt}\n\n${WAITING_REMINDER}`);
     }
   }
-  const silent = !String(result.rawText ?? "").trim() || (retried && isOnlyHeartbeat(result.rawText));
-  return { ...result, retried, reran, silent, note: Boolean(waiting) && silent };
+  if (!reran && looksLikeTextToolCall(replyBody(result.rawText))) {
+    retried = true;
+    if (now() - started < timeoutMs / 2) {
+      reran = true;
+      result = await runOnce(`${prompt}\n\n${TOOL_CALL_REMINDER}`);
+    }
+  }
+  const toolCallAsText = looksLikeTextToolCall(replyBody(result.rawText));
+  const silent =
+    !String(result.rawText ?? "").trim() || (retried && isOnlyHeartbeat(result.rawText)) || toolCallAsText;
+  return { ...result, retried, reran, silent, toolCallAsText, note: Boolean(waiting) && silent };
 }
 
 function formatMsg(agent, m) {
@@ -1199,11 +1249,24 @@ Hard rules now in force:
 // maps to a failure the live fishbowl produced at scale: ritual sign-offs with
 // hash footers, 1,400-char restatements of the task, the same fact posted to
 // chat + task card + tracker, and invented "proof package vNN" busywork.
+// For an agent with the deliverables-only setting (agents.config_json
+// .deliverablesOnly). The api enforces it too: past SUMMARY_MAX characters a
+// reply becomes a file, and a task goes to review only with a deliverable.
+const DELIVERABLES_ONLY_RULE = [
+  ``,
+  `DELIVERABLES ONLY (server-enforced): every document you make is a file on a task, never text in chat.`,
+  `  1. With no task for the request, emit create_task and stop; attach on your next turn, once its id is in MY TASKS.`,
+  `  2. Write the file with the write_file tool under /workspace/<your handle>/ (a real tool call, never JSON or code in your reply).`,
+  `  3. Check it exists (read_file or ls -l on the exact path). If it does not, say so, and claim nothing.`,
+  `  4. Attach it with share_to_task, path "/workspace/…". Set "review" only after it attached.`,
+  `  5. In chat, one or two sentences: what you made and where it is. Anything longer becomes a file automatically.`,
+].join("\n");
+
 const STYLE_RULES = [
   ``,
   `OUTPUT HYGIENE (server-enforced where marked):`,
   `  • NO SIGN-OFFS. Never end with "Signed", "Regards", your name/title line, or an "Artifact SHA-256" footer — the server strips them (and rejects a reply that is only a signature).`,
-  `  • ONE NEW FACT PER MESSAGE. Say the thing that changed since your last post, in 1–2 sentences. Do not restate the task, your role, the plan, or what was already on the card. A reply over ${CHAT_BODY_MAX} chars is cut at a sentence boundary — put long-form on the task card, not in chat.`,
+  `  • ONE NEW FACT PER MESSAGE. Say the thing that changed since your last post, in 1–2 sentences. Do not restate the task, your role, the plan, or what was already on the card. A reply over ${CHAT_BODY_MAX} chars is posted as its opening paragraph, with the full text attached as reply.md — put long-form on the task card, not in chat.`,
   `  • ONE SURFACE PER FACT. Never post the same fact to chat AND a task_comment AND project_note. Task progress → task_comment/share_to_task only. Project-level decisions/status → project_note only. Chat → only what a human needs to see right now. The server drops near-duplicate bodies across these surfaces (duplicate_of_recent) and near-duplicate tracker entries.`,
   `  • NO INVENTED WORK. Do not manufacture "proof packages", re-verify what is already verified, bump a version number on a status doc, or re-announce a fact already on the card to have something to post. If nothing real changed: HEARTBEAT_OK.`,
   `  • NEVER paste runtime output into a reply: "Reached maximum iterations", "Requesting summary", "Could not execute tool(s)", "File-mutation verifier", "Write denied", @@ARG markers, or a summary of your tool calls. If you ran out of tool turns, say the one concrete outcome (or HEARTBEAT_OK) — not a transcript. Do not talk to the prompt ("I read the attached history file…") — reply to the people.`,
@@ -1408,7 +1471,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     `Action types:`,
     `  {"type":"react","message_id":"<id>","emoji":"🙏"}            — react instead of writing an ack/thanks/agreement`,
     `  {"type":"share_files","conversation_id":"<id>","body_md":"<optional, can be empty>","reply_to":"<optional>","files":[{"url":"https://…","name":"cat.jpg"},{"path":"/workspace/report.pdf","name":"Q3-report.pdf"}]}`,
-    `                                                                — each file entry has EXACTLY ONE of "url" (http/https, server fetches it) or "path" (absolute under /workspace/ or /tmp/, server reads from disk). Use this to share web assets OR files you wrote to /workspace this turn. Up to 10 files, 20MB each. This replaces the old urllib/curl + /agent-api/uploads + <attachments> dance — always prefer share_files.`,
+    `                                                                — each file entry has EXACTLY ONE of "url" (http/https, server fetches it) or "path" (absolute under /workspace/; the server reads only a regular file there, never through a link; /tmp and your home are not readable). Use this to share web assets OR files you wrote to /workspace this turn. Up to 10 files, 20MB each. This replaces the old urllib/curl + /agent-api/uploads + <attachments> dance — always prefer share_files.`,
     `  {"type":"create_task","title":"…","body_md":"…","status":"backlog|in_progress|blocked|review|done","conversation_id":"<optional channel>","parent_id":"<optional parent task_…>","goal_id":"<optional goal_… this task serves>","assignees":["<memberId>","<memberId>"],"labels":["eng"],"due_at":"2026-05-01"}  — set goal_id (or parent_id, which inherits its goal) when the task serves an active goal, so it counts toward that goal's progress instead of floating as an orphan.`,
     `  {"type":"update_task","task_id":"task_…","status":"in_progress|blocked|review|done","progress":50,"title":"…","body_md":"…","due_at":"2026-05-01","archived":true}`,
     `                                                                — STATUS RULES (server-enforced): "blocked" = waiting on something outside your control (see BLOCKED PROTOCOL). "review" = your work is finished and a deliverable is attached — this is YOUR terminal state on tasks you're assigned to: the MAKER CANNOT MARK THEIR OWN WORK DONE (done_requires_review). Your manager or a human verifies the evidence and flips review → done. Flipping someone ELSE'S task to done (e.g. you're the reviewing manager) requires EVIDENCE on the card: a substantive deliverable in its artifacts store, or human sign-off after the maker's last comment (done_requires_evidence otherwise). So the flow is: do the work → share_to_task the real artifact → status:"review" → reviewer flips done.`,
@@ -1836,6 +1899,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
         ``,
         `Your reply body will be dropped — there is no conversation to post into. The ONLY valid output this turn is either (a) an <actions>[...]</actions> block doing real work on a task, or (b) exactly "HEARTBEAT_OK". No prose, no receipts, no "I will…".`,
         STYLE_RULES,
+        ...(agent.deliverablesOnly ? [DELIVERABLES_ONLY_RULE] : []),
       ]
     : [
         identity,
@@ -1865,6 +1929,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
         ``,
         `Reply briefly (1–2 sentences unless asked for more). Write only the reply text — no greetings, no sign-off, no markdown code fences around your reply.`,
         STYLE_RULES,
+        ...(agent.deliverablesOnly ? [DELIVERABLES_ONLY_RULE] : []),
       ];
   return sections.join("\n");
 }
@@ -2011,14 +2076,16 @@ function connect(entry) {
       const waiting = Boolean(conv) && personWaits(trigger, p, last);
       const turn = await turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs: HERMES_TIMEOUT * 1000 });
       const { exitError, rawText, runtimeFound, retried } = turn;
-      if (turn.reran) console.warn(`[${entry.handle}] ${trigger} → HEARTBEAT_OK while a person waits; ran the turn once more with a reminder`);
+      if (turn.toolCallAsText) console.warn(`[${entry.handle}] ${trigger} → a tool call written as text${turn.reran ? ", twice" : ""}; nothing posted`);
+      else if (turn.reran) console.warn(`[${entry.handle}] ${trigger} → HEARTBEAT_OK or a tool call as text; ran the turn once more with a reminder`);
       else if (retried) console.warn(`[${entry.handle}] ${trigger} → HEARTBEAT_OK while a person waits, too late for a rerun`);
       const runtimeError = runtimeFound.length ? `hermes_runtime_text: ${runtimeFound.join(", ")}` : undefined;
       // Nothing to post: a crash, empty streams, Hermes's runtime text alone,
       // or HEARTBEAT_OK after the rerun. With a person waiting, a short note
       // says so, rather than silence; Hermes's own text is never posted.
       if (turn.silent) {
-        const error = exitError ?? runtimeError ?? (retried ? "no_reply_after_retry" : "empty_reply");
+        const error =
+          exitError ?? runtimeError ?? (turn.toolCallAsText ? "tool_call_as_text" : retried ? "no_reply_after_retry" : "empty_reply");
         if (turn.note) {
           console.log(`[${entry.handle}] ${trigger} → nothing to post for a waiting person (${error}); posting the no-reply note`);
           return reply({
@@ -2092,7 +2159,7 @@ function connect(entry) {
       // it as a chat message — let any side-actions carry the turn. Without
       // this, a leaked `session_search(...)` or raw `{"type":...}` would land
       // in a channel as a garbage message.
-      const postBody = body && body.trim() && !isOnlyArtifact(body) ? body : "";
+      const postBody = body && body.trim() && !isOnlyArtifact(body) && !looksLikeTextToolCall(body) ? body : "";
       if (body && body.trim() && !postBody) {
         console.log(`[${entry.handle}] ${trigger} → body was tool-call/artifact-only; suppressing post (sideActions=${sideActions.length})`);
       }
@@ -2101,30 +2168,33 @@ function connect(entry) {
       // empty inbox + open tasks), conv is undefined — the agent's prose
       // would have nowhere to land, so we drop it and let the side-actions
       // (task_comment / share_to_task / update_task) carry the work.
+      // Past this length a reply goes to its task when it has one. A
+      // deliverables-only agent keeps only a summary in chat.
+      const deliverablesOnly = p.agent?.deliverablesOnly === true;
+      const chatMax = deliverablesOnly ? SUMMARY_MAX : CHAT_BODY_MAX;
       if (postBody && conv) {
         let chatBody = postBody;
-        if (postBody.length > CHAT_BODY_MAX) {
+        if (postBody.length > chatMax) {
           // Too long for chat. If this turn is about a task (the trigger's
           // task, or a task the agent targeted in its own actions), the long
           // form goes onto THAT card as a task_comment and chat gets a short
-          // pointer. Otherwise cut at a boundary and say so — never a silent
-          // mid-sentence chop.
+          // pointer. Otherwise it goes to chat whole. Either way the api keeps
+          // the text whole: past the surface's limit it becomes an attached
+          // reply.md (api/src/agents/long-reply.ts), never a cut.
           const routeTaskId =
             (p.task && typeof p.task.id === "string" && p.task.id) ||
             sideActions.find((sa) => sa && typeof sa.task_id === "string")?.task_id ||
             null;
           if (routeTaskId) {
-            const full = truncateAtBoundary(postBody, TASK_BODY_MAX);
             actions.push({
               type: "task_comment",
               task_id: routeTaskId,
-              body_md: full,
+              body_md: postBody,
             });
             chatBody = `${leadOf(postBody, CHAT_POINTER_MAX)}\n\n_Full update on the task card: ${routeTaskId}_`;
             console.log(`[${entry.handle}] ${trigger} → ${postBody.length}-char prose routed to task_comment on ${routeTaskId}; chat gets a ${chatBody.length}-char pointer`);
           } else {
-            chatBody = clipChatBody(postBody);
-            console.log(`[${entry.handle}] ${trigger} → ${postBody.length}-char prose cut at a boundary to ${chatBody.length} for chat`);
+            console.log(`[${entry.handle}] ${trigger} → ${postBody.length}-char prose to chat whole; the api attaches it as a file`);
           }
         }
         actions.push({
@@ -2145,12 +2215,11 @@ function connect(entry) {
           (Array.isArray(p.myTasks) && p.myTasks[0]?.id) ||
           null;
         if (targetTaskId) {
-          const wrapped = truncateAtBoundary(postBody, TASK_BODY_MAX);
-          console.log(`[${entry.handle}] task-only: auto-wrapping ${postBody.length}-char prose into task_comment on ${targetTaskId}${wrapped.length < postBody.length ? ` (cut to ${wrapped.length} at a boundary)` : ""}`);
+          console.log(`[${entry.handle}] task-only: auto-wrapping ${postBody.length}-char prose into task_comment on ${targetTaskId}`);
           actions.push({
             type: "task_comment",
             task_id: targetTaskId,
-            body_md: wrapped,
+            body_md: postBody,
           });
         } else {
           console.log(`[${entry.handle}] task-only: dropping ${postBody.length}-char prose (no conv and no task to wrap into)`);
@@ -2221,6 +2290,9 @@ export {
   turnForWaitingPerson,
   historyMessages,
   WAITING_REMINDER,
+  TOOL_CALL_REMINDER,
+  looksLikeTextToolCall,
+  DELIVERABLES_ONLY_RULE,
   NO_REPLY_NOTE,
   buildPrompt,
   extractActions,

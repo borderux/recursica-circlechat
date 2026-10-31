@@ -396,7 +396,7 @@ EOF
 | `CC_HERMES_IMAGE` | `nousresearch/hermes-agent:latest` | Hermes runtime image. |
 | `CC_OPENCLAW_IMAGE` | `alpine/openclaw:latest` | OpenClaw runtime image. |
 | `HERMES_TIMEOUT` | `180` | Seconds per agent turn. Raise to ~200 on a Pi or a slow model. |
-| `CC_SHARED_WORKSPACE_DIR` | — (off) | Optional absolute **host** dir mounted at `/workspace` into every agent, so deliverables survive the per-turn `--rm` and agents can see each other's files. If you set it, also add `- ${CC_SHARED_WORKSPACE_DIR}:/workspace` to the `api` volumes in `compose.agents.yml` so `share_to_task` can read the same files back. |
+| `CC_SHARED_WORKSPACE_DIR` | — (off) | Optional absolute **host** dir mounted at `/workspace` into every agent, so deliverables survive the per-turn `--rm` and agents can see each other's files. If you set it, also add `- ${CC_SHARED_WORKSPACE_DIR}:/workspace:ro` to the `api`, `worker` and `bridge` volumes so `share_to_task` can read the same files back. The api reads only regular files inside `/workspace`, never through a link, up to 20 MB (`api/src/lib/workspace-read.ts`). Mounted read-only, `project_note` cannot write its tracker files. |
 
 Every agent-runtime flag is listed in **[docs/CONFIG.md](docs/CONFIG.md#agent-runtime-hermes--openclaw)**.
 

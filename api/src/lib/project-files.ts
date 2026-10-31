@@ -2,6 +2,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { embed, cosine, embeddingsEnabled } from "./embeddings.js";
 import { findNearDuplicate } from "./text-similarity.js";
 import { envNum } from "./env.js";
+import { readWorkspaceFile, readWorkspaceText, workspaceRoot, writeWorkspaceFile, WorkspaceRefused } from "./workspace-read.js";
 
 // ─────────────────────────── Shared project memory ───────────────────────────
 // A file-based "blackboard" the agents form and manage themselves: multiple
@@ -25,7 +26,7 @@ import { envNum } from "./env.js";
 
 // Resolved per-call (not at module load) so tests can point it at a temp dir.
 function workspaceMount(): string {
-  return process.env.CC_WORKSPACE_MOUNT || "/workspace";
+  return workspaceRoot();
 }
 
 export function projectsRoot(): string {
@@ -37,6 +38,8 @@ const FILE_NAME_MAX = 48;
 // A single tracked file is capped so one runaway append can't blow the budget
 // or the disk; hitting it tells the agent to compact via mode:"replace".
 export const PROJECT_FILE_MAX_CHARS = 20000;
+// A tracked file is read only up to this size, through lib/workspace-read.ts.
+const PROJECT_FILE_MAX_BYTES = 1024 * 1024;
 // Injection budget (mirrors the knowledge limits in context.ts).
 const INDEX_MAX_CHARS = 2000;
 const FILES_MAX_COUNT = 4;
@@ -332,7 +335,6 @@ export async function writeProjectFile(params: {
   if (!slug) return { error: `project_note: "project" is not a usable name. Use a short slug like "neu-website".` };
   const mode: ProjectWriteMode = params.mode === "replace" ? "replace" : "append";
   const fileName = sanitizeProjectFileName(params.file, mode === "replace" ? "status.md" : "log.md");
-  const { promises: fsp } = await import("node:fs");
   const { join } = await import("node:path");
   const dir = join(projectsRoot(), slug);
   const abs = join(dir, fileName);
@@ -340,8 +342,13 @@ export async function writeProjectFile(params: {
   return withLock(abs, async () => {
     let current: string | null = null;
     try {
-      current = await fsp.readFile(abs, "utf8");
-    } catch {
+      current = (await readWorkspaceFile(abs, PROJECT_FILE_MAX_BYTES, workspaceMount())).toString("utf8");
+    } catch (e) {
+      // Missing is a new file. Anything else the guard refused (a link on the
+      // path, not a regular file) is never written through.
+      if (!(e instanceof WorkspaceRefused) || !/ does not exist$/.test(e.message)) {
+        return { error: `project_note: could not read projects/${slug}/${fileName} (${(e as Error).message}).` };
+      }
       current = null;
     }
     const res = applyProjectWrite(current, {
@@ -355,16 +362,14 @@ export async function writeProjectFile(params: {
     });
     if ("error" in res) return res;
     try {
-      await fsp.mkdir(dir, { recursive: true });
       // Compacted-out entries go to <project>/archive/<file> (append-only).
       // A subdirectory, so the index scan (files only) never picks it up and
       // the archive is never re-injected into prompts — still `cat`-able.
+      // Both writes go through lib/workspace-read.ts, which never follows a link.
       if (res.archived && res.archived.length) {
-        const archDir = join(dir, "archive");
-        await fsp.mkdir(archDir, { recursive: true });
-        await fsp.appendFile(join(archDir, fileName), res.archived.join("\n\n") + "\n\n", "utf8");
+        await writeWorkspaceFile(join(dir, "archive", fileName), res.archived.join("\n\n") + "\n\n", { append: true }, workspaceMount());
       }
-      await fsp.writeFile(abs, res.content, "utf8");
+      await writeWorkspaceFile(abs, res.content, {}, workspaceMount());
     } catch (e) {
       return { error: `project_note: could not write the file (${(e as Error).message}).` };
     }
@@ -402,9 +407,9 @@ export async function loadProjectIndex(): Promise<ProjectInfo[]> {
       const files: ProjectFileInfo[] = [];
       for (const name of fileNames) {
         const path = join(dir, name);
-        const st = await fsp.stat(path).catch(() => null);
-        if (!st) continue;
-        const raw = await fsp.readFile(path, "utf8").catch(() => "");
+        const st = await fsp.lstat(path).catch(() => null);
+        if (!st?.isFile()) continue;
+        const raw = await readWorkspaceText(path, PROJECT_FILE_MAX_BYTES, workspaceMount());
         const { meta, body } = parseProjectFile(raw);
         const snippet = bodyLead(body);
         files.push({ ...meta, name, path, size: st.size, mtimeMs: st.mtimeMs, snippet });
@@ -634,13 +639,12 @@ export function excerptForInjection(body: string, max: number): string {
 async function readProjectFileBodies(
   matched: ProjectFileInfo[],
 ): Promise<Array<{ project: string; name: string; content: string }>> {
-  const { promises: fsp } = await import("node:fs");
   const { basename, dirname } = await import("node:path");
   const out: Array<{ project: string; name: string; content: string }> = [];
   let total = 0;
   for (const f of matched) {
     if (out.length >= FILES_MAX_COUNT) break;
-    const raw = await fsp.readFile(f.path, "utf8").catch(() => "");
+    const raw = await readWorkspaceText(f.path, PROJECT_FILE_MAX_BYTES, workspaceMount());
     if (!raw.trim()) continue;
     const { body } = parseProjectFile(raw);
     if (!body) continue;
@@ -679,7 +683,6 @@ export async function buildProjectContext(
 // fine for a derived artifact.
 export async function regenerateIndexFile(): Promise<void> {
   const projects = await loadProjectIndex();
-  const { promises: fsp } = await import("node:fs");
   const { join } = await import("node:path");
   const body = [
     "# Project tracker",
@@ -691,6 +694,5 @@ export async function regenerateIndexFile(): Promise<void> {
     renderProjectIndex(projects, 100000) || "(no projects tracked yet)",
     "",
   ].join("\n");
-  await fsp.mkdir(projectsRoot(), { recursive: true }).catch(() => {});
-  await fsp.writeFile(join(projectsRoot(), "INDEX.md"), body, "utf8");
+  await writeWorkspaceFile(join(projectsRoot(), "INDEX.md"), body, {}, workspaceMount());
 }
