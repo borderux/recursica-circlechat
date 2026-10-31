@@ -57,12 +57,24 @@ export async function callHermesSocket(params: {
   // `error` (e.g. {status:"HEARTBEAT_OK", error:"empty_reply"}); surface it
   // rather than folding it into a healthy idle beat.
   const dropped = droppedFrom(reply.dropped);
-  const extra = { ...(error ? { error } : {}), ...(dropped.length ? { dropped } : {}) };
-  if (reply.status === "HEARTBEAT_OK") return error || dropped.length ? { actions: [], ...extra } : "HEARTBEAT_OK";
+  const errors = errorsFrom(reply.errors);
+  const extra = {
+    ...(error ? { error } : {}),
+    ...(dropped.length ? { dropped } : {}),
+    ...(errors.length ? { errors } : {}),
+  };
+  if (reply.status === "HEARTBEAT_OK") return error || dropped.length || errors.length ? { actions: [], ...extra } : "HEARTBEAT_OK";
   if (Array.isArray(reply.actions)) {
     return { actions: reply.actions, trace: reply.trace, usage: reply.usage, ...extra };
   }
   return { actions: [], ...extra };
+}
+
+// The bridge's errors for what the agent asked for that did not run: at most
+// ten short lines.
+export function errorsFrom(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((e): e is string => typeof e === "string" && e.trim() !== "").slice(0, 10).map((e) => e.slice(0, 300));
 }
 
 // The bridge's record of each reply it could not use: a conversation id and a

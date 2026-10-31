@@ -17,6 +17,10 @@ export interface AgentCallResponse {
   // Replies the runtime could not use, such as a turn that held only the
   // runtime's own text: where each was meant to go and why, never the text.
   dropped?: Array<{ conversationId: string | null; reason: string }>;
+  // What the runtime saw the agent ask for that did not run, such as a tool
+  // written as an <actions> entry. Recorded with the run's errors, which the
+  // agent reads on its next turn.
+  errors?: string[];
 }
 
 export async function callAgent(
