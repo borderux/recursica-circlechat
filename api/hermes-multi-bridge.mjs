@@ -9,6 +9,7 @@
 //   HERMES_HOME=<agent's home dir> so the invocation uses that agent's identity.
 import WebSocket from "ws";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync, watchFile } from "node:fs";
 import { join as joinPath } from "node:path";
 
@@ -167,7 +168,15 @@ function reconcile() {
   }
 }
 
-function buildHermesSpawn(hermesHome, hermesArgs, envExtras = {}) {
+// A turn container's name: cc-turn-<agent>-<id>, so the host's notices name
+// the agent instead of Docker's random name. Docker allows [a-zA-Z0-9_.-]
+// after a leading letter or digit; anything else in a handle becomes "-".
+function turnContainerName(handle, id = randomBytes(4).toString("hex")) {
+  const agent = String(handle ?? "").toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^[^a-z0-9]+|-+$/g, "").slice(0, 40) || "agent";
+  return `cc-turn-${agent}-${id}`;
+}
+
+function buildHermesSpawn(hermesHome, hermesArgs, envExtras = {}, handle) {
   if (HERMES_RUNTIME === "host") {
     const env = { ...process.env, ...envExtras };
     if (hermesHome) env.HERMES_HOME = hermesHome;
@@ -192,6 +201,7 @@ function buildHermesSpawn(hermesHome, hermesArgs, envExtras = {}) {
     "run",
     "--rm",
     "-i",
+    ...(handle ? ["--name", turnContainerName(handle)] : []),
     ...agentNetworkArgs(),
     // How long the daemon waits after SIGTERM before SIGKILLing the container.
     // Without it a stop is a 10 s guillotine through whatever s6 was draining.
@@ -266,14 +276,14 @@ function hermesChatArgs(prompt, modelOverride) {
   return args;
 }
 
-function callHermes(prompt, hermesHome, token, modelOverride) {
+function callHermes(prompt, hermesHome, token, modelOverride, handle) {
   return new Promise((resolve, reject) => {
     const hermesArgs = hermesChatArgs(prompt, modelOverride);
     const envExtras = {
       CC_API_BASE: AGENT_API_BASE,
       CC_BOT_TOKEN: token,
     };
-    const spec = buildHermesSpawn(hermesHome, hermesArgs, envExtras);
+    const spec = buildHermesSpawn(hermesHome, hermesArgs, envExtras, handle);
     // The timeout SIGTERMs `docker run`, which forwards the signal to the
     // container; the daemon then honours --stop-timeout, so the drain window
     // above applies to the timeout path too. Add it to our own deadline so we
@@ -297,12 +307,13 @@ function callHermes(prompt, hermesHome, token, modelOverride) {
 // One-shot openclaw invocation against a container-local agent. Uses
 // `openclaw agent --local --agent main` — the `main` agent is always
 // present in a freshly onboarded state dir.
-function callOpenClaw(prompt, openclawHome, token) {
+function callOpenClaw(prompt, openclawHome, token, handle) {
   return new Promise((resolve, reject) => {
     const args = [
       "run",
       "--rm",
       "-i",
+      ...(handle ? ["--name", turnContainerName(handle)] : []),
       "--user",
       "0:0",
       ...agentNetworkArgs(),
@@ -935,6 +946,38 @@ const ALLOWED_ACTION_TYPES = new Set([
   "share_files",
   "share_to_task",
   "project_note",
+  // In the prompt and the executor, but missing here, so they were dropped
+  // without a word: a delegate_to never reached its teammate.
+  "delegate_to",
+  "memory_append",
+  "memory_rethink",
+  "run_code",
+]);
+// Hermes's own tools. One written as an <actions> entry is a tool call written
+// as text: actions run after the turn, in CircleChat, and cannot write a file.
+// Observed from a gpt-oss agent: write_file and read_file entries in its
+// <actions> block, so no file was written and its share attached nothing.
+const HERMES_TOOL_NAMES = new Set([
+  "write_file",
+  "read_file",
+  "patch",
+  "search_files",
+  "terminal",
+  "execute_code",
+  "browser_exec",
+  "web_search",
+  "web_extract",
+  "vision_analyze",
+  "delegate_task",
+  "memory",
+  "clarify",
+  "skill_manage",
+  "skill_view",
+  "skills_list",
+  "tool_call",
+  "tool_describe",
+  "tool_search",
+  "manage_connections",
 ]);
 // Agents paraphrase action names. The skill describes capabilities in a
 // friendly vocabulary ("comment on the task") and reasoning models emit the
@@ -959,14 +1002,20 @@ const ACTION_ALIASES = {
 function canonicalActionType(type) {
   return ACTION_ALIASES[type] ?? type;
 }
-function sanitizeActions(arr) {
+// Keeps the entries whose type CircleChat runs. Each other type is pushed onto
+// <dropped>, so the turn can say what did not run instead of dropping it
+// silently.
+function sanitizeActions(arr, dropped = []) {
   const clean = [];
   if (!Array.isArray(arr)) return clean;
   for (const raw of arr) {
     if (!raw || typeof raw !== "object") continue;
     if (typeof raw.type !== "string") continue;
     const type = canonicalActionType(raw.type);
-    if (!ALLOWED_ACTION_TYPES.has(type)) continue;
+    if (!ALLOWED_ACTION_TYPES.has(type)) {
+      dropped.push(type.slice(0, 60));
+      continue;
+    }
     raw.type = type; // normalize in place so the executor sees the canonical name
     clean.push(raw);
     if (clean.length >= 20) break;
@@ -977,6 +1026,7 @@ function extractActions(text) {
   // The prompt asks for a JSON array. A single object is taken as a list of
   // one, and objects one per line as a list, so a small format slip still runs
   // the actions and posts the reply. The whole block leaves the body either way.
+  // `dropped` lists the entries' types that are not CircleChat actions.
   const re = /<actions>\s*([[{][\s\S]*?[\]}])\s*<\/actions>/i;
   const m = re.exec(text);
   if (m) {
@@ -985,9 +1035,11 @@ function extractActions(text) {
     try {
       parsed = JSON.parse(m[1]);
     } catch {
-      return { body, actions: extractActions(m[1]).actions };
+      const inner = extractActions(m[1]);
+      return { body, actions: inner.actions, dropped: inner.dropped };
     }
-    return { body, actions: sanitizeActions(Array.isArray(parsed) ? parsed : [parsed]) };
+    const dropped = [];
+    return { body, actions: sanitizeActions(Array.isArray(parsed) ? parsed : [parsed], dropped), dropped };
   }
   // No <actions> wrapper — the model sometimes emits the action as a bare JSON
   // object (or ```json fenced) sitting alone on its own line(s), e.g.
@@ -1015,12 +1067,13 @@ function extractActions(text) {
       spans.push([mm.index, bare.lastIndex]);
     }
   }
-  if (!collected.length) return { body: text, actions: [] };
+  if (!collected.length) return { body: text, actions: [], dropped: [] };
   let body = text;
   for (const [s, e] of spans.reverse()) body = body.slice(0, s) + body.slice(e);
   // Tags whose content was taken out above, such as an unclosed array.
   body = body.replace(/<actions>\s*<\/actions>/gi, "");
-  return { body: body.trim(), actions: sanitizeActions(collected) };
+  const dropped = [];
+  return { body: body.trim(), actions: sanitizeActions(collected, dropped), dropped };
 }
 
 // ── Hermes's own runtime text ───────────────────────────────────────────────
@@ -1087,6 +1140,7 @@ const WAITING_REMINDER = [
 const TOOL_CALL_REMINDER = [
   "REMINDER: your last reply was a tool call written out as text (JSON or code), so nothing ran and nothing was posted.",
   "Call the tool itself through tool calling (write_file, terminal, execute_code), never by writing its arguments into your reply.",
+  "write_file and read_file are tools you call now; <actions> run after your turn ends and cannot write files.",
   "Then reply in plain prose about what the tool did.",
 ].join(" ");
 
@@ -1115,6 +1169,27 @@ function looksLikeTextToolCall(text) {
 // <attachments> blocks.
 function replyBody(rawText) {
   return extractAttachments(extractActions(String(rawText ?? "")).body).body;
+}
+
+// The Hermes tools a raw reply wrote as <actions> entries.
+function toolsInActions(rawText) {
+  return [...new Set((extractActions(String(rawText ?? "")).dropped ?? []).filter((t) => HERMES_TOOL_NAMES.has(t)))];
+}
+
+// A reply that tried to use a tool by writing it out: printed JSON or code, or
+// a tool written as an <actions> entry.
+function isTextToolCall(rawText) {
+  return looksLikeTextToolCall(replyBody(rawText)) || toolsInActions(rawText).length > 0;
+}
+
+// What a turn's <actions> block asked for that CircleChat did not run, as run
+// errors: the agent reads them on its next turn, and the run records them.
+function droppedActionErrors(dropped) {
+  return [...new Set(dropped ?? [])].slice(0, 10).map((type) =>
+    HERMES_TOOL_NAMES.has(type)
+      ? `tool_in_actions: ${type} is a tool, not an action. Call it through tool calling during your turn; an <actions> entry runs after the turn and cannot write or read files.`
+      : `unknown_action: ${type} is not a CircleChat action, so it did not run.`,
+  );
 }
 
 // Posted when the rerun gives nothing either, so the person is not left waiting.
@@ -1153,14 +1228,14 @@ async function turnForWaitingPerson(runOnce, prompt, { waiting, timeoutMs, now =
       result = await runOnce(`${prompt}\n\n${WAITING_REMINDER}`);
     }
   }
-  if (!reran && looksLikeTextToolCall(replyBody(result.rawText))) {
+  if (!reran && isTextToolCall(result.rawText)) {
     retried = true;
     if (now() - started < timeoutMs / 2) {
       reran = true;
       result = await runOnce(`${prompt}\n\n${TOOL_CALL_REMINDER}`);
     }
   }
-  const toolCallAsText = looksLikeTextToolCall(replyBody(result.rawText));
+  const toolCallAsText = isTextToolCall(result.rawText);
   const silent =
     !String(result.rawText ?? "").trim() || (retried && isOnlyHeartbeat(result.rawText)) || toolCallAsText;
   return { ...result, retried, reran, silent, toolCallAsText, note: Boolean(waiting) && silent };
@@ -1249,6 +1324,30 @@ Hard rules now in force:
 // maps to a failure the live fishbowl produced at scale: ritual sign-offs with
 // hash footers, 1,400-char restatements of the task, the same fact posted to
 // chat + task card + tracker, and invented "proof package vNN" busywork.
+// Tools and actions look alike in the prompt, and a model mixed them up: it
+// wrote write_file into its <actions> block, so no file was written.
+const TOOLS_VS_ACTIONS =
+  "TOOLS vs ACTIONS: tools (write_file, read_file, terminal, execute_code) are called through tool calling and run during your turn; their results come back to you. <actions> entries run after your reply, in CircleChat only (posts, tasks, shares). A file is written only by a tool, never by an <actions> entry.";
+
+// On a task turn, the request is the task's: its newest comment from a person,
+// else its title and description. It leads the prompt, ahead of the channel's
+// history, so an older request in the channel is not taken for this turn's.
+function taskRequestBlock(packet) {
+  const t = packet.task;
+  if (!t || (packet.trigger !== "task_assigned" && packet.trigger !== "task_comment")) return "";
+  const comments = Array.isArray(t.recentComments) ? t.recentComments : [];
+  const fromPerson = [...comments].reverse().find((c) => packet.members?.[c.memberId]?.kind !== "agent");
+  const ask = fromPerson
+    ? `@${fromPerson.memberHandle} on the task: ${String(fromPerson.bodyMd ?? "").slice(0, 2000)}`
+    : `${t.title}${t.bodyMd ? ` — ${String(t.bodyMd).slice(0, 2000)}` : ""}`;
+  return [
+    ``,
+    `THIS TURN'S REQUEST (task "${t.title}", ${t.id}):`,
+    ask,
+    `Do exactly this. The conversation history below is background only: an earlier request there is not this turn's request.`,
+  ].join("\n");
+}
+
 // For an agent with the deliverables-only setting (agents.config_json
 // .deliverablesOnly). The api enforces it too: past SUMMARY_MAX characters a
 // reply becomes a file, and a task goes to review only with a deliverable.
@@ -1429,6 +1528,8 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     .filter(Boolean)
     .join(" ");
 
+  // A Hermes agent has real tools (write_file, terminal, …) besides actions.
+  const hermesTools = !(entry.kind === "openclaw" || typeof entry.openclawHome === "string");
   const toolBlock = [
     ...(homeHasMcp(entry.hermesHome)
       ? [
@@ -1442,6 +1543,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     `The block is parsed out of your reply, executed server-side, and stripped from the message body before it posts. Use it whenever you'd otherwise promise to "do" something.`,
     ``,
     `IMPORTANT: <actions> is LITERAL TEXT you write in your reply body. It is NOT a tool call. Do NOT invoke share_files, create_task, react, or any action type below as a function/tool — write the JSON inside <actions>…</actions> tags as part of your message. If your runtime tries to auto-route one of these names to a similarly-named tool (e.g. share_files → search_files), that means you emitted it wrong: wrap it in <actions> next turn.`,
+    ...(hermesTools ? [TOOLS_VS_ACTIONS] : []),
     ``,
     `DO IT, DON'T TASK IT. If the user is asking for a direct in-chat thing you can fulfill this turn — share a file from the web, fetch and summarise a page, look something up, send a DM, react — DO IT with the matching action. Don't self-assign a create_task and call it a day. Tasks are for multi-step work that spans sessions, needs delegation, or genuinely needs tracking. "Add cat photos from the web" is NOT a ticket to create — it's a share_files action with URLs you fetched or found.`,
     ``,
@@ -1482,7 +1584,11 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     `  {"type":"task_comment","task_id":"task_…","body_md":"…","mentions":["m_…"],"attachments":[<optional, hand-rolled descriptors from /uploads>]}`,
     `  {"type":"share_to_task","task_id":"task_…","body_md":"progress note","files":[{"url":"https://…","name":"snapshot.png"},{"path":"/workspace/report.pdf","name":"Q3.pdf"}]}`,
     `                                                                — mirror of share_files but attaches to a task card. Use this to drop progress updates + artifacts (screenshots, PDFs, data files) on tasks you're working on during heartbeats. Files show up on the task AND are saved as DURABLE, VERSIONED deliverables on that task. To see what's already been delivered for a task (so you build on it instead of redoing it), call GET /agent-api/tasks/<id>/artifacts. You can also submit a deliverable directly with POST /agent-api/tasks/<id>/artifacts (multipart file, {"url":"https://…"}, or {"name":"notes.md","contentText":"…"}).`,
-    `  {"type":"run_code","language":"python|bash","code":"<program>"}  — run code in a locked-down throwaway sandbox (no network, no filesystem beyond a scratch /tmp, hard timeout). Its stdout/stderr comes back to you NEXT turn under "RESULT of the code you ran". Use it to compute, parse, or verify something concretely instead of guessing — never to fake output. (Only if enabled for this workspace; if you get "run_code is disabled", do it another way.)`,
+    // Hermes agents have execute_code and terminal as tools; offering run_code
+    // as an action too led a gpt-oss agent to call run_code as a tool.
+    ...(hermesTools ? [] : [
+      `  {"type":"run_code","language":"python|bash","code":"<program>"}  — run code in a locked-down throwaway sandbox (no network, no filesystem beyond a scratch /tmp, hard timeout). Its stdout/stderr comes back to you NEXT turn under "RESULT of the code you ran". Use it to compute, parse, or verify something concretely instead of guessing — never to fake output. (Only if enabled for this workspace; if you get "run_code is disabled", do it another way.)`,
+    ]),
     `  {"type":"open_thread","message_id":"<id>","body_md":"…"}      — start a thread reply on a specific message`,
     `  {"type":"set_memory","key":"<snake_case>","value":<any JSON>,"scope":"global|conversation|task","scope_id":"<c_… or task_… (omit for global)>"}  — persist a note across runs. Pick the narrowest scope that applies; existing values are in YOUR MEMORY above.`,
     `  {"type":"delete_memory","key":"<key>","scope":"…","scope_id":"…"}  — remove a memory entry that's no longer true.`,
@@ -1879,6 +1985,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
   const sections = taskOnly
     ? [
         identity,
+        taskRequestBlock(packet),
         briefBlock,
         knowledgeBlock,
         ``,
@@ -1903,6 +2010,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
       ]
     : [
         identity,
+        taskRequestBlock(packet),
         briefBlock,
         knowledgeBlock,
         ``,
@@ -2049,8 +2157,8 @@ function connect(entry) {
       // (stripHermesRuntimeText), and the container's exit as a run error.
       const runOnce = async (promptText) => {
         const { stdout, stderr, exitCode, signal } = isOpenClaw
-          ? await callOpenClaw(promptText, entry.openclawHome, entry.token)
-          : await callHermes(promptText, entry.hermesHome, entry.token, modelOverride);
+          ? await callOpenClaw(promptText, entry.openclawHome, entry.token, entry.handle)
+          : await callHermes(promptText, entry.hermesHome, entry.token, modelOverride, entry.handle);
         // A container that exited non-zero (or was killed) did NOT have a clean
         // turn, whatever text it managed to emit first: its supervision tree was
         // torn down mid-flight, which on Hermes suspends any in-flight cron
@@ -2153,6 +2261,10 @@ function connect(entry) {
       const body = afterAtt.body;
       const attachments = afterAtt.attachments;
       const sideActions = afterActions.actions;
+      // Entries CircleChat does not run, said back to the agent and the run.
+      const actionErrors = droppedActionErrors(afterActions.dropped);
+      if (actionErrors.length) console.warn(`[${entry.handle}] ${trigger} → <actions> held ${afterActions.dropped.join(", ")}, which did not run`);
+      const errorsField = actionErrors.length ? { errors: actionErrors } : {};
       const actions = [];
       // Final suppression: if the remaining body is nothing but machinery
       // (tool-call syntax, leftover JSON, diff/boot/spinner noise), don't post
@@ -2229,10 +2341,11 @@ function connect(entry) {
       console.log(
         `[${entry.handle}] replying, len=${postBody.length}, att=${attachments.length}${sideActions.length ? `, actions=${sideActions.length} (${sideActions.map((a) => a.type).join("+")})` : ""}`,
       );
-      if (actions.length === 0) return reply({ status: "HEARTBEAT_OK", ...outcomeErr });
+      if (actions.length === 0) return reply({ status: "HEARTBEAT_OK", ...outcomeErr, ...errorsField });
       reply({
         actions,
         ...outcomeErr,
+        ...errorsField,
         trace: [`${entry.handle} responded, len=${postBody.length}${attachments.length ? `, att=${attachments.length}` : ""}${sideActions.length ? `, actions=${sideActions.length}` : ""}${runaway ? ", runaway" : ""}`],
       });
     } catch (e) {
@@ -2288,6 +2401,12 @@ export {
   personWaits,
   isOnlyHeartbeat,
   turnForWaitingPerson,
+  isTextToolCall,
+  toolsInActions,
+  droppedActionErrors,
+  turnContainerName,
+  TOOLS_VS_ACTIONS,
+  taskRequestBlock,
   historyMessages,
   WAITING_REMINDER,
   TOOL_CALL_REMINDER,

@@ -489,6 +489,12 @@ const worker = new Worker<AgentJobPayload>(
       triggerConversationId: payload.conversationId ?? null,
       waiting: personWaits(payload.trigger, packet),
     });
+    // What the bridge saw the agent ask for that did not run (a tool written as
+    // an <actions> entry, an unknown action type) joins the run's errors, so
+    // the agent reads it on its next turn instead of it vanishing.
+    if (response !== "HEARTBEAT_OK" && Array.isArray(response.errors)) {
+      outcome.errors.unshift(...response.errors);
+    }
     // Each reply that could not be used, from the bridge (a turn with nothing
     // usable) and from the executor (a post the guard refused): where it was
     // meant to go and why, never the text. A host reads these from result_json.
