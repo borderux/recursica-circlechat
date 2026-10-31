@@ -221,7 +221,11 @@ export async function maybeFireAgentTrigger(
   taskId: string,
   conversationId: string | null,
   trigger: "task_assigned" | "task_comment",
+  actorMemberId?: string,
 ): Promise<void> {
+  // An agent assigning a task to itself is its own activity: it does not wake
+  // the agent again (agents/settled-work.ts).
+  if (actorMemberId && actorMemberId === memberId) return;
   const [m] = await db
     .select({ kind: members.kind, refId: members.refId })
     .from(members)
@@ -514,7 +518,7 @@ export async function createTask(input: CreateTaskInput, creatorMemberId: string
   });
   if (!input.deferAssigneeTrigger) {
     for (const mid of validAssignees) {
-      await maybeFireAgentTrigger(mid, taskId, input.conversationId ?? null, "task_assigned");
+      await maybeFireAgentTrigger(mid, taskId, input.conversationId ?? null, "task_assigned", creatorMemberId);
     }
   }
   return { task: hydrated };
@@ -966,7 +970,7 @@ export async function addAssignee(taskId: string, target: string, actorMemberId:
     taskId,
     task: hydrated,
   });
-  await maybeFireAgentTrigger(target, taskId, t!.conversationId, "task_assigned");
+  await maybeFireAgentTrigger(target, taskId, t!.conversationId, "task_assigned", actorMemberId);
   // Inbox notification if the assignee is a human (agents get the trigger
   // above). notify() itself no-ops on agent members, so this is safe to call
   // unconditionally. Fire-and-forget.
