@@ -40,3 +40,23 @@ export function parseMinutes(text: string): number | null {
   const n = Number(text);
   return n >= 1 && n <= MAX_CLOUD_WAIT_MINUTES ? n : null;
 }
+
+// A request to move a task off Cluster only, waiting for an approver.
+export type PendingCloudRequest = {
+  id: string;
+  setting: CloudModelsSetting;
+  requestedBy: { memberId: string; name: string };
+  requestedAt: string;
+};
+
+export function describePendingRequest(
+  p: PendingCloudRequest,
+  formatTime: (iso: string) => string = (iso) => new Date(iso).toLocaleString(),
+): string {
+  return `Waiting for an approver: ${describeCloudModels(p.setting)}, asked by ${p.requestedBy.name} on ${formatTime(p.requestedAt)}.`;
+}
+
+// The dialog's choice that sends no request.
+export function keepChoiceLabel(current: CloudModelsSetting): string {
+  return current.mode === "cluster_only" ? "Keep the task on the cluster" : "Keep the current setting";
+}
