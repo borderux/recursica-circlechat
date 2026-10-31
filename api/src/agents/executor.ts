@@ -56,6 +56,13 @@ import { writeAudit } from "../lib/access-control.js";
 import { enqueueAgentEvent } from "./enqueue.js";
 import { safePublicFetch } from "../lib/safe-fetch.js";
 import { applyCounted } from "../lib/run-outcome.js";
+import {
+  HEARTBEAT_CREATE_TASK_ERROR,
+  TASK_ACTIONS,
+  isHeartbeatTrigger,
+  settledTaskError,
+  settledTasksFor,
+} from "./settled-work.js";
 
 export interface AgentAttachment {
   key: string;
@@ -659,6 +666,11 @@ export async function applyActions(params: {
   // A person waits on this turn in the trigger conversation (personWaits in
   // waiting.ts): a DM, or a person's @-mention.
   waiting?: boolean;
+  // What woke the run, and whether a person posted, commented or assigned
+  // something since the agent's last run. A heartbeat turn without that may not
+  // create a task (settled-work.ts).
+  trigger?: string;
+  freshPersonActivity?: boolean;
 }): Promise<ExecOutcome> {
   const { agentId, runId } = params;
   const out: ExecOutcome = { actionsApplied: 0, errors: [], trace: [] };
@@ -704,6 +716,7 @@ export async function applyActions(params: {
     scopes = agentRow?.scopes ?? [];
   }
 
+  const settledAtStart = new Map<string, string | null>();
   for (const a of fileActionsFirst(params.actions)) {
     // Server-side belt for action-name paraphrases. The bridge normalizes
     // synonyms (comment_on_task → task_comment, etc.) before actions reach
@@ -737,6 +750,28 @@ export async function applyActions(params: {
     if (shapeError) {
       out.errors.push(shapeError);
       continue;
+    }
+    // A finished request stays finished (settled-work.ts): a heartbeat turn
+    // makes no task nobody new asked for, and a task its assignee settled is
+    // left alone until a person comments on it. A task's state is read on this
+    // run's first action on it, so a turn that moves its own task to review
+    // can still comment on it in the same reply.
+    if (a.type === "create_task" && isHeartbeatTrigger(params.trigger) && !params.freshPersonActivity) {
+      out.errors.push(HEARTBEAT_CREATE_TASK_ERROR);
+      out.trace.push("create_task refused: heartbeat turn with nothing new from a person");
+      continue;
+    }
+    const taskId = TASK_ACTIONS.has(a.type) ? (a as { task_id?: unknown }).task_id : undefined;
+    if (typeof taskId === "string" && taskId) {
+      if (!settledAtStart.has(taskId)) {
+        settledAtStart.set(taskId, (await settledTasksFor(agentMember.id, [taskId])).get(taskId) ?? null);
+      }
+      const settledStatus = settledAtStart.get(taskId);
+      if (settledStatus) {
+        out.errors.push(settledTaskError(a.type, taskId, settledStatus));
+        out.trace.push(`${a.type} refused: ${taskId} is settled (${settledStatus})`);
+        continue;
+      }
     }
     try {
       // Gate an action when it's out of scope (enforcement on) OR at/above the

@@ -1151,10 +1151,21 @@ const TOOL_CALL_REMINDER = [
 // the script that should have written the files. Such a reply is never posted.
 const TOOL_ARGS_OPEN_RE = /^\s*(?:```(?:json)?\s*)?\{\s*"(?:code|command|cmd|path|file_path|content|script|query|input)"\s*:/;
 const HARMONY_MARKUP_RE = /<\|(?:start|channel|message|call|constrain|end|return)\|>|\bto=functions\.[A-Za-z_]/;
+// A line or a few of text, then a tool's arguments as the rest of the reply:
+// "# Write 00_STUDY_PLAN.txt for test-2 project" and then {"session": …,
+// "code": "from pathlib import Path …"}. Same check as textThenToolCall in
+// api/src/agents/reply-guard.ts.
+const TOOL_ARG_KEY_RE = /[{,]\s*["“](?:code|command|cmd|path|file_path|content|script|query|input)["”]\s*:/i;
+function textThenToolCall(text) {
+  const m = /^((?:[^\n]*\n){1,3}?)\s*(?:```(?:json)?\s*)?(\{[\s\S]*\})\s*(?:```)?\s*$/.exec(String(text ?? "").trim());
+  if (!m) return false;
+  const lead = m[1].trim();
+  return lead.length > 0 && lead.length <= 300 && !/^[[{]/.test(lead) && TOOL_ARG_KEY_RE.test(m[2]);
+}
 function looksLikeTextToolCall(text) {
   const t = String(text ?? "").trim();
   if (!t) return false;
-  if (TOOL_ARGS_OPEN_RE.test(t) || HARMONY_MARKUP_RE.test(t)) return true;
+  if (TOOL_ARGS_OPEN_RE.test(t) || HARMONY_MARKUP_RE.test(t) || textThenToolCall(t)) return true;
   const bare = t.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   if (!/^[[{]/.test(bare)) return false;
   try {
@@ -2411,6 +2422,7 @@ export {
   WAITING_REMINDER,
   TOOL_CALL_REMINDER,
   looksLikeTextToolCall,
+  textThenToolCall,
   DELIVERABLES_ONLY_RULE,
   NO_REPLY_NOTE,
   buildPrompt,

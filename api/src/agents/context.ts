@@ -28,6 +28,7 @@ import { latestVerdictSummary } from "../lib/task-verifier.js";
 import { buildProjectContext } from "../lib/project-files.js";
 import { readWorkspaceText, workspaceRoot } from "../lib/workspace-read.js";
 import { approvalExpiresAt } from "../lib/approval-policy.js";
+import { isHeartbeatTrigger, newWorkMessages, settledTasksFor } from "./settled-work.js";
 import type { CloudModelsSetting } from "../lib/cloud-models-rules.js";
 
 export interface MemberInfo {
@@ -367,7 +368,11 @@ export async function buildContext(opts: {
 
   // For channel context — include the LAST N messages (not just since last beat) when
   // we've been woken by mention/dm so the agent knows what's already been said.
-  const includeHistory = opts.trigger !== "scheduled" && opts.trigger !== "continuation";
+  // A heartbeat turn (scheduled or ambient) gets no history: an old request in
+  // it reads as new work, and a gpt-oss agent redid delivered transcripts all
+  // night from the ambient turn's history (settled-work.ts).
+  const heartbeat = isHeartbeatTrigger(opts.trigger);
+  const includeHistory = !heartbeat && opts.trigger !== "continuation";
   const historyLimit = 20;
   const historyMsgs = convIds.length && includeHistory
     ? await db
@@ -394,7 +399,8 @@ export async function buildContext(opts: {
 
   // Merge-deduped by id, most-recent-first.
   const byId = new Map<string, (typeof newMsgs)[number]>();
-  for (const m of [...newMsgs, ...historyMsgs]) if (!byId.has(m.id)) byId.set(m.id, m);
+  const freshMsgs = heartbeat ? newWorkMessages(newMsgs, agentMemberId, opts.sinceTs) : newMsgs;
+  for (const m of [...freshMsgs, ...historyMsgs]) if (!byId.has(m.id)) byId.set(m.id, m);
   const all = Array.from(byId.values()).sort((a, b) => +b.ts - +a.ts);
 
   const byConv = new Map<string, typeof newMsgs>();
@@ -871,7 +877,14 @@ export async function buildContext(opts: {
         .orderBy(desc(tasks.updatedAt))
         .limit(20)
     : [];
-  const openMyTaskRows = myTaskRows.filter((t) => t.status !== "done").slice(0, 12);
+  // A heartbeat's task list leaves out settled tasks: in review, done or
+  // cancelled, with no person's comment since (settled-work.ts).
+  const settledForHeartbeat = heartbeat
+    ? await settledTasksFor(agentMemberId, myTaskRows.map((t) => t.id))
+    : new Map<string, string>();
+  const openMyTaskRows = myTaskRows
+    .filter((t) => t.status !== "done" && !settledForHeartbeat.has(t.id))
+    .slice(0, 12);
   const myTaskIdsOpen = openMyTaskRows.map((t) => t.id);
 
   const myLatestComments = myTaskIdsOpen.length

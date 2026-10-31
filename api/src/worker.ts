@@ -111,6 +111,7 @@ async function detectAndFlagStuck(agentId: string): Promise<boolean> {
 import { redactSecrets, redactLines } from "./lib/redaction.js";
 import { startGoalPlanWorker } from "./agents/goal-planner-worker.js";
 import { scheduleGoalSweep, scheduleMissionSweep } from "./lib/goal-queue.js";
+import { isHeartbeatTrigger } from "./agents/settled-work.js";
 import {
   modelRecommendation,
   recordModelUsage,
@@ -488,6 +489,10 @@ const worker = new Worker<AgentJobPayload>(
       actions,
       triggerConversationId: payload.conversationId ?? null,
       waiting: personWaits(payload.trigger, packet),
+      trigger: payload.trigger,
+      freshPersonActivity: isHeartbeatTrigger(payload.trigger)
+        ? isPersonWake(await wakeReasonForAgent(agent.id, sinceTs))
+        : true,
     });
     // What the bridge saw the agent ask for that did not run (a tool written as
     // an <actions> entry, an unknown action type) joins the run's errors, so
@@ -727,6 +732,11 @@ const STALE_TASK_MS = envNum("CC_STALE_TASK_MS", 10 * 60 * 1000, { min: 1 });
 // non-productive backoff may suppress.
 type WakeReason = "human_message" | "human_comment" | "new_assignment" | "stale_task";
 
+// A person posted, commented or assigned something since the last run.
+function isPersonWake(wake: WakeReason | null): boolean {
+  return wake === "human_message" || wake === "human_comment" || wake === "new_assignment";
+}
+
 async function wakeReasonForAgent(agentId: string, sinceTs: Date): Promise<WakeReason | null> {
   const [agentMember] = await db
     .select({ id: members.id })
@@ -804,7 +814,14 @@ async function wakeReasonForAgent(agentId: string, sinceTs: Date): Promise<WakeR
     const [{ n: na }] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(taskAssignees)
-      .where(and(eq(taskAssignees.memberId, agentMember.id), gt(taskAssignees.assignedAt, sinceTs)));
+      .where(
+        and(
+          eq(taskAssignees.memberId, agentMember.id),
+          gt(taskAssignees.assignedAt, sinceTs),
+          // An agent assigning a task to itself is its own activity, not new work.
+          ne(taskAssignees.assignedBy, agentMember.id),
+        ),
+      );
     if (na > 0) return "new_assignment";
 
     // Any task I own where MY OWN last comment is older than STALE_TASK_MS
@@ -832,7 +849,14 @@ async function wakeReasonForAgent(agentId: string, sinceTs: Date): Promise<WakeR
   const [{ n: na }] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(taskAssignees)
-    .where(and(eq(taskAssignees.memberId, agentMember.id), gt(taskAssignees.assignedAt, sinceTs)));
+    .where(
+      and(
+        eq(taskAssignees.memberId, agentMember.id),
+        gt(taskAssignees.assignedAt, sinceTs),
+        // An agent assigning a task to itself is its own activity, not new work.
+        ne(taskAssignees.assignedBy, agentMember.id),
+      ),
+    );
   if (na > 0) return "new_assignment";
 
   return null;

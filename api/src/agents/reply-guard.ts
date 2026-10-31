@@ -69,6 +69,17 @@ const TOOL_NAME_JSON_RE =
 // script that should have written the files, and nothing ran.
 const TOOL_ARGS_JSON_RE =
   /^\s*(?:```(?:json)?\s*)?\{\s*["“](?:code|command|cmd|path|file_path|content|script|query|input)["”]\s*:/i;
+// A line or a few of text, then a tool's arguments as the rest of the reply.
+// Observed from a gpt-oss agent: "# Write 00_STUDY_PLAN.txt for test-2 project"
+// and then {"session": …, "code": "from pathlib import Path …"}. The object's
+// first key was not a tool argument, so the check above missed it.
+const TOOL_ARG_KEY_RE = /[{,]\s*["“](?:code|command|cmd|path|file_path|content|script|query|input)["”]\s*:/i;
+export function textThenToolCall(text: string): boolean {
+  const m = /^((?:[^\n]*\n){1,3}?)\s*(?:```(?:json)?\s*)?(\{[\s\S]*\})\s*(?:```)?\s*$/.exec(String(text ?? "").trim());
+  if (!m) return false;
+  const lead = m[1]!.trim();
+  return lead.length > 0 && lead.length <= 300 && !/^[[{]/.test(lead) && TOOL_ARG_KEY_RE.test(m[2]!);
+}
 // gpt-oss's own tool-call markup (its "harmony" format), which the model
 // server turns into a tool call only when the model gets it exactly right.
 const HARMONY_MARKUP_RE = /<\|(?:start|channel|message|call|constrain|end|return)\|>|\bto=functions\.[A-Za-z_]/;
@@ -928,6 +939,7 @@ export function checkReplyBody(
   if (TRACEBACK_RE.test(trimmed)) return { ok: false, reason: "python_traceback" };
   if (TOOL_USE_RE.test(trimmed)) return { ok: false, reason: "tool_use_markup" };
   if (TOOL_ARGS_JSON_RE.test(trimmed) || HARMONY_MARKUP_RE.test(trimmed)) return { ok: false, reason: "tool_call_as_text" };
+  if (textThenToolCall(trimmed.replace(CUT_NOTE_RE, ""))) return { ok: false, reason: "tool_call_as_text" };
   if (TOOL_CALL_JSON_RE.test(trimmed)) return { ok: false, reason: "tool_call_json" };
   if (TOOL_NAME_JSON_RE.test(trimmed)) return { ok: false, reason: "tool_call_json" };
   if (ACTION_JSON_RE.test(trimmed)) return { ok: false, reason: "action_json_leaked" };
