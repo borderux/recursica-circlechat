@@ -1036,11 +1036,62 @@ function sanitizeActions(arr, dropped = []) {
   }
   return clean;
 }
+// An <actions> block in a model's own tool-call form instead of JSON. Observed
+// from qwen3-coder, the whole block:
+//   <actions> <parameter=type> update_task </parameter> <parameter=task_id>
+//   task_… </parameter> <parameter=status> in_progress </parameter> </actions>
+// Each <function=NAME> starts an action of that type, and so does a second
+// <parameter=type>. A value that reads as JSON (a number, true, a list) is
+// taken as JSON. Returns the actions, or null when the text has no parameter.
+const PARAMETER_RE = /<function=([\w.-]+)>|<parameter=([\w.-]+)>\s*([\s\S]*?)\s*<\/parameter>/g;
+function parseParameterActions(inner) {
+  const actions = [];
+  let cur = null;
+  let seen = false;
+  for (const m of String(inner ?? "").matchAll(PARAMETER_RE)) {
+    seen = true;
+    if (m[1]) {
+      cur = { type: m[1] };
+      actions.push(cur);
+      continue;
+    }
+    const [name, raw] = [m[2], m[3]];
+    if (!cur || (name === "type" && cur.type !== undefined)) {
+      cur = {};
+      actions.push(cur);
+    }
+    let value = raw;
+    if (/^(?:[[{]|-?\d|true$|false$|null$)/.test(raw)) {
+      try { value = JSON.parse(raw); } catch { value = raw; }
+    }
+    cur[name] = value;
+  }
+  return seen ? actions.filter((a) => typeof a.type === "string" && a.type) : null;
+}
+
+// An <actions> block the bridge cannot read leaves the reply, so the person
+// still gets the prose; the block is recorded on the run instead. A reply
+// with a visible <actions> tag used to be dropped whole.
+const ANY_ACTIONS_BLOCK_RE = /<actions>([\s\S]*?)(?:<\/actions>|$)/i;
+function unreadableSnippet(block) {
+  return String(block ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 function extractActions(text) {
   // The prompt asks for a JSON array. A single object is taken as a list of
   // one, and objects one per line as a list, so a small format slip still runs
   // the actions and posts the reply. The whole block leaves the body either way.
   // `dropped` lists the entries' types that are not CircleChat actions.
+  // `unreadable` holds each block that could not be read at all.
+  text = String(text ?? "");
+  const any = ANY_ACTIONS_BLOCK_RE.exec(text);
+  if (any && !/^\s*[[{]/.test(any[1])) {
+    const body = text.replace(any[0], "").trim();
+    const parsed = parseParameterActions(any[1]);
+    const dropped = [];
+    if (parsed && parsed.length) return { body, actions: sanitizeActions(parsed, dropped), dropped };
+    return { body, actions: [], dropped, unreadable: [unreadableSnippet(any[0])] };
+  }
   const re = /<actions>\s*([[{][\s\S]*?[\]}])\s*<\/actions>/i;
   const m = re.exec(text);
   if (m) {
@@ -1081,7 +1132,13 @@ function extractActions(text) {
       spans.push([mm.index, bare.lastIndex]);
     }
   }
-  if (!collected.length) return { body: text, actions: [], dropped: [] };
+  if (!collected.length) {
+    // A JSON-looking block that is not JSON, such as a cut-off array: strip it
+    // and keep the prose, as for any block that cannot be read.
+    const left = ANY_ACTIONS_BLOCK_RE.exec(text);
+    if (left) return { body: text.replace(left[0], "").trim(), actions: [], dropped: [], unreadable: [unreadableSnippet(left[0])] };
+    return { body: text, actions: [], dropped: [] };
+  }
   let body = text;
   for (const [s, e] of spans.reverse()) body = body.slice(0, s) + body.slice(e);
   // Tags whose content was taken out above, such as an unclosed array.
@@ -1209,12 +1266,17 @@ function isTextToolCall(rawText) {
 
 // What a turn's <actions> block asked for that CircleChat did not run, as run
 // errors: the agent reads them on its next turn, and the run records them.
-function droppedActionErrors(dropped) {
-  return [...new Set(dropped ?? [])].slice(0, 10).map((type) =>
-    HERMES_TOOL_NAMES.has(type)
-      ? `tool_in_actions: ${type} is a tool, not an action. Call it through tool calling during your turn; an <actions> entry runs after the turn and cannot write or read files.`
-      : `unknown_action: ${type} is not a CircleChat action, so it did not run.`,
-  );
+function droppedActionErrors(dropped, unreadable = []) {
+  return [
+    ...[...new Set(dropped ?? [])].slice(0, 10).map((type) =>
+      HERMES_TOOL_NAMES.has(type)
+        ? `tool_in_actions: ${type} is a tool, not an action. Call it through tool calling during your turn; an <actions> entry runs after the turn and cannot write or read files.`
+        : `unknown_action: ${type} is not a CircleChat action, so it did not run.`,
+    ),
+    ...(unreadable ?? []).slice(0, 3).map(
+      (block) => `unreadable_actions: an <actions> block could not be read, so nothing in it ran; your text was posted without it. Write actions as a JSON array: <actions>[{"type":"update_task","task_id":"…","status":"in_progress"}]</actions>. The block: ${block}`,
+    ),
+  ];
 }
 
 // Posted when the rerun gives nothing either, so the person is not left waiting.
@@ -1547,7 +1609,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
               : packet.trigger === "ambient"
                 ? `Ambient window — the channel's been quiet and the team wants to keep it feeling alive. You're allowed (not required) to post a short, in-character contribution: continue the last thread of thought, ask a specific colleague something in your role's lane (@-mention them), share what you're working on, or react to a recent message. ONE message only, 1–2 sentences, no fake enthusiasm. If you genuinely have nothing to add right now, respond with exactly "HEARTBEAT_OK" — don't post filler.`
                 : packet.trigger === "task_assigned"
-                  ? `You were assigned a task on the workspace board. Task details are below in the TASK block. Decide what to do: if you can get started now, move it to in_progress via the task API and optionally comment on the task to tell the team you've picked it up. If the scope is unclear, add a comment with your clarifying question rather than starting work. If this isn't in your lane, add a comment saying so and unassign yourself. Don't post in the channel just to say "got it" — the activity log already shows the assignment. Return "HEARTBEAT_OK" if you acknowledged via the task itself.`
+                  ? `You were assigned a task on the workspace board. Task details are below in the TASK block. Follow your persona, and start the work in this turn: when your persona asks questions before working, post those questions now, as plain text, a few at a time; otherwise do the first real step of the work now. Never only move the task's status: a status change alone is not a turn's work. If this isn't in your lane, add a comment saying so and unassign yourself. Don't post in the channel just to say "got it" — the activity log already shows the assignment.`
                   : packet.trigger === "task_comment"
                     ? `A new comment landed on a task you're involved with. Read the recent comments in the TASK block. Reply by adding a comment on the task (POST /agent-api/tasks/<id>/comments), not by posting in the channel. If the comment is a question for you, answer concretely. If it's an ack, a thanks, or a status note that asks nothing of you and changes nothing about your work, respond with "HEARTBEAT_OK" — do NOT echo it back, restate the situation, or add a "noted" comment. Silence is the correct move on the task thread more often than not.`
                     : packet.trigger === "approval_response"
@@ -2302,8 +2364,9 @@ function connect(entry) {
       const attachments = afterAtt.attachments;
       const sideActions = afterActions.actions;
       // Entries CircleChat does not run, said back to the agent and the run.
-      const actionErrors = droppedActionErrors(afterActions.dropped);
-      if (actionErrors.length) console.warn(`[${entry.handle}] ${trigger} → <actions> held ${afterActions.dropped.join(", ")}, which did not run`);
+      const actionErrors = droppedActionErrors(afterActions.dropped, afterActions.unreadable);
+      if (afterActions.dropped.length) console.warn(`[${entry.handle}] ${trigger} → <actions> held ${afterActions.dropped.join(", ")}, which did not run`);
+      if (afterActions.unreadable?.length) console.warn(`[${entry.handle}] ${trigger} → an <actions> block could not be read; it was stripped, and the prose posts`);
       const errorsField = actionErrors.length ? { errors: actionErrors } : {};
       const actions = [];
       // Final suppression: if the remaining body is nothing but machinery
