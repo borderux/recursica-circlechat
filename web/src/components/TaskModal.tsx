@@ -23,6 +23,7 @@ import Attachments from "./Attachments";
 import Modal from "./Modal";
 import VerificationBadge from "./VerificationBadge";
 import { CloudModelsField } from "./CloudModels";
+import { TaskPriorityField } from "./AgentQueue";
 import { describeCloudModels, type CloudModelsSetting } from "../lib/cloudModels";
 import { Popover } from "@base-ui/react/popover";
 import { useMentionPicker, resolveMentionIds } from "../lib/useMentionPicker";
@@ -751,6 +752,8 @@ export default function TaskModal({
                 <span className="tm-rail-progress-num">{t.progress}%</span>
               </div>
             </div>
+
+            <TaskPriorityField taskId={t.id} />
 
             {!spectator && <CloudModelsField taskId={t.id} />}
 

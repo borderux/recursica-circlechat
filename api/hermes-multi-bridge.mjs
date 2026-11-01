@@ -110,8 +110,7 @@ const inFlight = new Map(); // handle → Promise that settles when its turn end
 // Background beats are DROPPED when the agent is already mid-turn: by the time
 // the running turn finishes, the beat's context packet is stale, and re-running
 // it just pays for the same wake twice. Triggers where a human or a decision is
-// waiting are not dropped — those are reported so the run is recorded honestly
-// rather than silently swallowed.
+// waiting are never dropped: they wait for the turn to end (waitForAgentSlot).
 const DROPPABLE_WHEN_BUSY = new Set(["scheduled", "ambient"]);
 
 // Exported for tests. Returns null when the handle is free (and marks it busy
@@ -119,8 +118,10 @@ const DROPPABLE_WHEN_BUSY = new Set(["scheduled", "ambient"]);
 export function claimAgentSlot(handle, trigger, now = Date.now()) {
   const held = inFlight.get(handle);
   if (!held) {
-    inFlight.set(handle, { trigger, startedAt: now });
-    return { ok: true, done: () => inFlight.delete(handle) };
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    inFlight.set(handle, { trigger, startedAt: now, released });
+    return { ok: true, done: () => { inFlight.delete(handle); release(); } };
   }
   return {
     ok: false,
@@ -130,6 +131,19 @@ export function claimAgentSlot(handle, trigger, now = Date.now()) {
       `${Math.round((now - held.startedAt) / 1000)}s; refusing to start a second ` +
       `container on the same HERMES_HOME`,
   };
+}
+
+// A request is never refused: when the home is busy, it waits for the running
+// turn to end and then takes the home. The api's worker already runs one turn
+// at a time per agent and queues the rest (api/src/agents/turn-queue.ts), so
+// a wait here is the rare overlap, such as a deploy with two workers. A stale
+// background beat is still dropped.
+export async function waitForAgentSlot(handle, trigger) {
+  for (;;) {
+    const slot = claimAgentSlot(handle, trigger);
+    if (slot.ok || slot.droppable) return slot;
+    await inFlight.get(handle)?.released;
+  }
 }
 
 // Per-handle connection registry so reconcile() can add/remove agents on the
@@ -1359,17 +1373,30 @@ function taskRequestBlock(packet) {
   ].join("\n");
 }
 
+// How every agent reads a request, on every runtime. Observed: an agent was
+// asked on a task for "one fake 15-minute transcript, 2 speakers, a product
+// demo", saw only the task's title in its first turn, and asked six times in
+// three hours whether the deliverable was a transcript or something else.
+const REQUEST_RULES = [
+  ``,
+  `REQUESTS:`,
+  `  • The request is what a person asked. On a task it is the person's newest comment; the task's title is only a label. Read the request before deciding anything is unclear.`,
+  `  • A request that names what to make (what it is, and its size, people or subject) is clear. Make it, and choose sensible values for anything it leaves out.`,
+  `  • Ask only when something you cannot reasonably choose is missing. Ask once, in one question, then wait: never ask again, rephrase the question, post "waiting for…" notes, or block the task to repeat it. A person's reply wakes you.`,
+].join("\n");
+
 // For an agent with the deliverables-only setting (agents.config_json
 // .deliverablesOnly). The api enforces it too: past SUMMARY_MAX characters a
 // reply becomes a file, and a task goes to review only with a deliverable.
+// A document can simply be the reply: the api saves a reply past SUMMARY_MAX
+// characters as a file on the task or message, keeping its first paragraph
+// as the post. The tool path is for a file the reply cannot hold.
 const DELIVERABLES_ONLY_RULE = [
   ``,
-  `DELIVERABLES ONLY (server-enforced): every document you make is a file on a task, never text in chat.`,
-  `  1. With no task for the request, emit create_task and stop; attach on your next turn, once its id is in MY TASKS.`,
-  `  2. Write the file with the write_file tool under /workspace/<your handle>/ (a real tool call, never JSON or code in your reply).`,
-  `  3. Check it exists (read_file or ls -l on the exact path). If it does not, say so, and claim nothing.`,
-  `  4. Attach it with share_to_task, path "/workspace/…". Set "review" only after it attached.`,
-  `  5. In chat, one or two sentences: what you made and where it is. Anything longer becomes a file automatically.`,
+  `DELIVERABLES ONLY (server-enforced): every document you make is a file, never a wall of text in chat.`,
+  `  • A text document can be your reply itself. Past ${SUMMARY_MAX} characters the reply is saved as a file on the task (or the message), and the post keeps only its first paragraph, so open with one short paragraph that says what it is. No tool and no action is needed for that.`,
+  `  • A file the reply cannot hold (code, data, a document in another format): write it with the write_file tool under /workspace/<your handle>/ (a real tool call, never JSON or code in your reply), check it exists with read_file or ls -l, then attach it with share_to_task, path "/workspace/…". Never claim a file you did not check.`,
+  `  • Set a task to "review" only when its deliverable is attached.`,
 ].join("\n");
 
 const STYLE_RULES = [
@@ -1706,10 +1733,15 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
       const due = t.dueAt ? ` · due ${String(t.dueAt).slice(0, 10)}` : "";
       const prog = t.progress ? ` · ${t.progress}%` : "";
       const convHint = t.conversationName ? ` · from #${t.conversationName}` : "";
-      const latest = t.latestComment
+      // The request is a person's newest comment; the title is only a label.
+      // The latest comment alone was often the agent's own question.
+      const request = t.request
+        ? `\n      request from @${t.request.memberHandle}: ${String(t.request.bodyMd).slice(0, 300).replace(/\n/g, " ")}`
+        : "";
+      const latest = t.latestComment && !(t.request && t.latestComment.ts === t.request.ts)
         ? `\n      ↳ @${t.latestComment.memberHandle}: ${String(t.latestComment.bodyMd).slice(0, 140).replace(/\n/g, " ")}`
         : "";
-      return `  • ${t.id} [${t.status}${prog}${due}${convHint}] ${t.title}${latest}`;
+      return `  • ${t.id} [${t.status}${prog}${due}${convHint}] ${t.title}${request}${latest}`;
     });
     const tail = taskOnly
       ? [
@@ -1997,6 +2029,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     ? [
         identity,
         taskRequestBlock(packet),
+        REQUEST_RULES,
         briefBlock,
         knowledgeBlock,
         ``,
@@ -2022,6 +2055,7 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
     : [
         identity,
         taskRequestBlock(packet),
+        REQUEST_RULES,
         briefBlock,
         knowledgeBlock,
         ``,
@@ -2146,17 +2180,11 @@ function connect(entry) {
     // One container at a time per HERMES_HOME. See claimAgentSlot above: a
     // second concurrent container `--replace`s the first one's gateway and
     // loses its reply.
-    const slot = claimAgentSlot(entry.handle, trigger);
+    const slot = await waitForAgentSlot(entry.handle, trigger);
     if (!slot.ok) {
+      // A stale background beat is dropped; a request waited for its turn.
       console.warn(`[${entry.handle}] ${trigger} → ${slot.reason}`);
-      // A stale background beat is dropped outright; anything a human or a
-      // decision is waiting on is reported so the run is recorded as failed
-      // instead of vanishing.
-      return reply(
-        slot.droppable
-          ? { status: "HEARTBEAT_OK", trace: [slot.reason] }
-          : { error: slot.reason, trace: [slot.reason] },
-      );
+      return reply({ status: "HEARTBEAT_OK", trace: [slot.reason] });
     }
 
     const prompt = buildPrompt(entry, p);
@@ -2417,6 +2445,7 @@ export {
   droppedActionErrors,
   turnContainerName,
   TOOLS_VS_ACTIONS,
+  REQUEST_RULES,
   taskRequestBlock,
   historyMessages,
   WAITING_REMINDER,

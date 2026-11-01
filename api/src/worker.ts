@@ -1,4 +1,4 @@
-import { Worker } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import { eq, desc, and, ne, gt, sql, inArray } from "drizzle-orm";
 import { AGENT_QUEUE, type AgentJobPayload } from "./agents/queue.js";
 import { redis } from "./lib/redis.js";
@@ -111,7 +111,8 @@ async function detectAndFlagStuck(agentId: string): Promise<boolean> {
 import { redactSecrets, redactLines } from "./lib/redaction.js";
 import { startGoalPlanWorker } from "./agents/goal-planner-worker.js";
 import { scheduleGoalSweep, scheduleMissionSweep } from "./lib/goal-queue.js";
-import { isHeartbeatTrigger } from "./agents/settled-work.js";
+import { ambientHasMessages, heartbeatCursor, isHeartbeatTrigger, waitingTasksFor } from "./agents/settled-work.js";
+import { claimTurn, releaseTurn } from "./agents/turn-queue.js";
 import {
   modelRecommendation,
   recordModelUsage,
@@ -123,9 +124,34 @@ import {
   workflowAgentContext,
 } from "./lib/workflow-engine.js";
 
+// The run each job started, so a job that throws mid-turn does not leave its
+// run holding the agent (agents/turn-queue.ts).
+const startedRunByJob = new Map<string, string>();
+
 const worker = new Worker<AgentJobPayload>(
   AGENT_QUEUE,
   async (job) => {
+    try {
+      await processAgentJob(job);
+    } finally {
+      const started = job.id ? startedRunByJob.get(job.id) : undefined;
+      if (job.id) startedRunByJob.delete(job.id);
+      if (started) {
+        await db
+          .update(agentRuns)
+          .set({ status: "failed", errorText: "worker_error", finishedAt: new Date() })
+          .where(and(eq(agentRuns.id, started), eq(agentRuns.status, "running")))
+          .catch((e) => console.error("[worker] closing a run left running failed", e));
+      }
+      // The turn is over however it ended: the request at the front of the
+      // agent's queue starts now.
+      await releaseTurn(job.data.agentId).catch((e) => console.error("[worker] queue release failed", e));
+    }
+  },
+  { connection: redis, concurrency: 10, lockDuration: 240_000 },
+);
+
+async function processAgentJob(job: Job<AgentJobPayload>): Promise<void> {
     const payload = job.data;
 
     // Check the agent exists BEFORE materialising the run or emitting any
@@ -208,7 +234,22 @@ const worker = new Worker<AgentJobPayload>(
       return;
     }
 
-    await db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
+    // One turn at a time per agent (agents/turn-queue.ts). A request that
+    // arrives during a turn joins the agent's queue instead of being refused;
+    // a heartbeat is skipped while the agent is busy or has requests waiting.
+    const claim = await claimTurn(agent.id, runId, payload, isHeartbeatTrigger(payload.trigger));
+    if (claim === "hold") return;
+    if (claim === "skip") {
+      await db
+        .update(agentRuns)
+        .set({ status: "ok", resultJson: { skipped: "agent_busy" }, finishedAt: new Date() })
+        .where(eq(agentRuns.id, runId));
+      await emitFinished(agent.id, runId, "ok", payload.conversationId);
+      return;
+    }
+    if (job.id) startedRunByJob.set(job.id, runId);
+    // A request that waited starts its clock now.
+    await db.update(agentRuns).set({ startedAt: new Date() }).where(eq(agentRuns.id, runId));
     await db.update(agents).set({ status: "working" }).where(eq(agents.id, agent.id));
     void setAgentPresence(agent.id, "working");
     if (payload.conversationId) {
@@ -233,24 +274,45 @@ const worker = new Worker<AgentJobPayload>(
       });
     }
 
-    // Build context packet: last-beat cursor is the previous run's startedAt.
+    // Build context packet. The cursor is when the agent's last real turn
+    // started: a turn reads the workspace when it starts, so anything posted
+    // during it is still new. A run that never reached the model (skipped,
+    // held, refused) does not move the cursor. It used to be the previous
+    // run's finish, whatever that run was: a request refused as agent_busy
+    // 48 ms after a person's comment hid that comment from every heartbeat.
     const prevRuns = await db
       .select()
       .from(agentRuns)
       .where(and(eq(agentRuns.agentId, agent.id), ne(agentRuns.id, runId)))
       .orderBy(desc(agentRuns.startedAt))
       .limit(1);
-    const sinceTs =
-      prevRuns[0]?.finishedAt ?? prevRuns[0]?.startedAt ?? new Date(Date.now() - 1000 * 60 * 60);
+    const recentRuns = await db
+      .select({
+        startedAt: agentRuns.startedAt,
+        status: agentRuns.status,
+        errorText: agentRuns.errorText,
+        resultJson: agentRuns.resultJson,
+        contextJson: agentRuns.contextJson,
+      })
+      .from(agentRuns)
+      .where(and(eq(agentRuns.agentId, agent.id), ne(agentRuns.id, runId)))
+      .orderBy(desc(agentRuns.startedAt))
+      .limit(200);
+    const sinceTs = heartbeatCursor(recentRuns) ?? new Date(Date.now() - 1000 * 60 * 60);
 
     // Activity gate for scheduled heartbeats: if nothing has changed in the
     // agent's channels or open tasks since their last run, skip the LLM call
     // entirely. Most scheduled runs fire into a quiet workspace and produce
     // filler — this is the cheapest, highest-impact way to cut that noise.
-    if (payload.trigger === "scheduled") {
+    // An ambient turn goes through the same gate: it used to skip it, and with
+    // nothing new it was handed a blocked task and asked the same question
+    // four times in an afternoon.
+    if (isHeartbeatTrigger(payload.trigger)) {
       const wake = await wakeReasonForAgent(agent.id, sinceTs);
       if (!wake) {
-        const bo = await noteScheduledSkip(agent.id, agent.heartbeatIntervalSec);
+        const bo = payload.trigger === "scheduled"
+          ? await noteScheduledSkip(agent.id, agent.heartbeatIntervalSec)
+          : { backoffMs: 0, streak: 0 };
         if (bo.backoffMs > 0) {
           console.log(
             `[worker] agent=${agent.handle} no-activity streak=${bo.streak} → scheduled backoff ${Math.round(bo.backoffMs / 60000)}m`,
@@ -270,7 +332,7 @@ const worker = new Worker<AgentJobPayload>(
       }
       // A real reason to wake — decay the no-op streak all the way back so the
       // next quiet spell starts from zero rather than from a stale count.
-      await clearScheduledSkipBackoff(agent.id);
+      if (payload.trigger === "scheduled") await clearScheduledSkipBackoff(agent.id);
       // Non-productive-streak backoff. Only the self-generated "progress beat"
       // reason is suppressed — a human message/comment/assignment always wakes.
       if (wake === "stale_task") {
@@ -355,6 +417,18 @@ const worker = new Worker<AgentJobPayload>(
       lastCodeResult,
       steering: payload.status ?? null,
     });
+    // An ambient turn is for the channel. With no new message in any channel
+    // it has nothing to say; the bridge would fall back to task-only mode and
+    // press the agent to act on its tasks, which is a heartbeat's job.
+    if (payload.trigger === "ambient" && !ambientHasMessages(packet)) {
+      await db
+        .update(agentRuns)
+        .set({ status: "ok", resultJson: { skipped: "ambient_nothing_new" }, finishedAt: new Date() })
+        .where(eq(agentRuns.id, runId));
+      await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agent.id));
+      await emitFinished(agent.id, runId, "ok", payload.conversationId);
+      return;
+    }
     packet.modelRoute = await modelRecommendation({
       workspaceId: agent.workspaceId,
       trigger: payload.trigger,
@@ -674,9 +748,7 @@ const worker = new Worker<AgentJobPayload>(
         }).catch((e) => console.error("[worker] continuation enqueue failed", e));
       }
     }
-  },
-  { connection: redis, concurrency: 10, lockDuration: 240_000 },
-);
+}
 
 async function emitFinished(
   agentId: string,
@@ -831,8 +903,11 @@ async function wakeReasonForAgent(agentId: string, sinceTs: Date): Promise<WakeR
     //   • review  — the work is submitted and waiting on a REVIEWER; an
     //     assignee beat here only produces "Proof package v23…v32" re-posts.
     const cutoff = new Date(Date.now() - STALE_TASK_MS);
+    //   • waiting — the agent asked a person and nobody has answered yet
+    //     (settled-work.ts); a person's answer wakes it as human_comment.
+    const waiting = await waitingTasksFor(agentMember.id, myOpenTasks.map((t) => t.taskId));
     for (const t of myOpenTasks) {
-      if (t.status === "blocked" || t.status === "review") continue;
+      if (t.status === "blocked" || t.status === "review" || waiting.has(t.taskId)) continue;
       const [latestMine] = await db
         .select({ ts: taskComments.ts })
         .from(taskComments)

@@ -197,7 +197,9 @@ describe("the deliverables-only setting", () => {
     const on = bridge.buildPrompt({ handle: "writer", name: "Writer" }, packet(true));
     const off = bridge.buildPrompt({ handle: "writer", name: "Writer" }, packet(false));
     expect(on).toContain(bridge.DELIVERABLES_ONLY_RULE);
-    expect(on).toContain("Write the file with the write_file tool under /workspace/<your handle>/");
+    // The transcript can be the reply itself: past 600 characters it is saved as a file.
+    expect(on).toContain("A text document can be your reply itself. Past 600 characters the reply is saved as a file");
+    expect(on).toContain("write it with the write_file tool under /workspace/<your handle>/");
     expect(off).not.toContain("DELIVERABLES ONLY");
   });
 });

@@ -62,6 +62,9 @@ export interface AgentJobPayload {
   // Immutable snapshot of the board stage that caused this run. The task may
   // move again before a busy worker starts; execution must still obey the
   // original stage contract rather than reading a later column by accident.
+  // Fork: the job was started from the agent's queue (agents/turn-queue.ts),
+  // so it goes ahead of the requests still waiting.
+  fromQueue?: boolean;
   stageExecution?: {
     stage: string;
     title: string;
