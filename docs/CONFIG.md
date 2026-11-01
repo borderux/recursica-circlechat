@@ -282,7 +282,7 @@ The extras below mainly matter for tuning/observability:
 |-----|---------|--------|
 | `PORT` | `3000` | API listen port. |
 | `LOG_LEVEL` | `info` | Pino log level. |
-| `STORAGE_DIR` | `./storage` | Filesystem object store root (uploads, task artifacts). Mount a durable volume in production so blobs survive image rebuilds. |
+| `STORAGE_DIR` | `./storage` | Filesystem object store root (uploads, task artifacts, long replies saved as files). compose.yml sets `/app/storage` on the `storage` volume, shared by the api and the worker; `/health` reports `storage: "not_shared"` when the api cannot see the worker's files. |
 | `WEB_DIST_DIR` | — | Path to the built web bundle the API serves. |
 | `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | Optional LLM tracing/observability. |
 

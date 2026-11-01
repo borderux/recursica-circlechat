@@ -65,9 +65,16 @@ services:
     # working schema instead of an empty database. `drizzle migrate` is
     # idempotent, so this is a no-op on subsequent starts.
     command: ["sh", "-c", "node dist/db/migrate.js && node dist/index.js"]
+    # Stored files (uploads, task deliverables, long replies saved as files)
+    # live on the storage volume, shared with the worker, which saves agents'
+    # deliverables. A folder inside the container was lost on every rebuild,
+    # and the api could not see the worker's files.
+    volumes:
+      - storage:/app/storage
     environment:
       NODE_ENV: production
       PORT: 3000
+      STORAGE_DIR: /app/storage
       DATABASE_URL: postgres://postgres:${PG_PASSWORD:-circlechat}@postgres:5432/circlechat
       REDIS_URL: redis://redis:6379
       S3_ENDPOINT: http://minio:9000
@@ -165,8 +172,11 @@ services:
   worker:
     build: ./api
     command: ["node", "dist/worker.js"]
+    volumes:
+      - storage:/app/storage
     environment:
       NODE_ENV: production
+      STORAGE_DIR: /app/storage
       DATABASE_URL: postgres://postgres:${PG_PASSWORD:-circlechat}@postgres:5432/circlechat
       REDIS_URL: redis://redis:6379
       API_INTERNAL_URL: http://api:3000
@@ -252,6 +262,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  storage:
   pgdata:
   caddy_data:
   caddy_config:

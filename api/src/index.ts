@@ -38,6 +38,7 @@ import enterpriseRoutes, { enterprisePublicRoutes, serviceApiRoutes } from "./ro
 import { fileServeRoutes, fileDirectoryRoutes } from "./routes/files.js";
 import cloudModelsRoutes from "./routes/cloud-models.js";
 import agentQueueRoutes from "./routes/agent-queue.js";
+import { workerStorageVerdict, writeStorageProbe } from "./lib/storage-probe.js";
 import eventsWs from "./ws/events.js";
 import agentSocketWs from "./ws/agent-socket.js";
 import { logJudgeConfigOnce } from "./lib/task-verifier.js";
@@ -109,7 +110,13 @@ const API_VERSION: string = (() => {
 // compose healthchecks) and under /api (the only prefix Caddy proxies to the
 // API, so external monitors can reach it). Rate-limit exempt so a probe every
 // few seconds from several monitors can't eat the client's budget.
-const healthHandler = async () => ({ ok: true, version: API_VERSION, time: new Date().toISOString() });
+// storage: whether the worker's saved files are visible here (lib/storage-probe.ts).
+const healthHandler = async () => ({
+  ok: true,
+  version: API_VERSION,
+  time: new Date().toISOString(),
+  storage: await workerStorageVerdict().catch(() => "unknown"),
+});
 app.get("/health", { config: { rateLimit: false } }, healthHandler);
 app.get("/api/health", { config: { rateLimit: false } }, healthHandler);
 
@@ -226,6 +233,18 @@ if (existsSync(webDist)) {
 try {
   await app.listen({ port: config.port, host: "0.0.0.0" });
   app.log.info({ port: config.port }, "circlechat api listening");
+  // The api and the worker must share one file store (lib/storage-probe.ts).
+  // The worker may start after the api, so check once it has had time to.
+  await writeStorageProbe("api").catch((e) => app.log.error({ err: e }, "storage probe failed"));
+  setTimeout(() => {
+    void workerStorageVerdict().then((v) => {
+      if (v === "not_shared") {
+        app.log.error("the worker's saved files are not visible to the api: mount one volume at STORAGE_DIR in both");
+      } else {
+        app.log.info({ storage: v }, "file store check");
+      }
+    });
+  }, 60_000).unref();
   // Say out loud which endpoint/model the verification judge will call. On the
   // live box every VERIFY_JUDGE_* var was empty and the judge silently
   // inherited the planner gateway with model "auto" — invisible in the logs.

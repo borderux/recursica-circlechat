@@ -113,6 +113,7 @@ import { startGoalPlanWorker } from "./agents/goal-planner-worker.js";
 import { scheduleGoalSweep, scheduleMissionSweep } from "./lib/goal-queue.js";
 import { ambientHasMessages, heartbeatCursor, isHeartbeatTrigger, waitingTasksFor } from "./agents/settled-work.js";
 import { claimTurn, releaseTurn } from "./agents/turn-queue.js";
+import { writeStorageProbe } from "./lib/storage-probe.js";
 import {
   modelRecommendation,
   recordModelUsage,
@@ -941,6 +942,8 @@ worker.on("error", (e) => console.error("[worker] error", e));
 worker.on("failed", (job, err) => console.error("[worker] job failed", job?.id, err?.message));
 
 console.log(`[worker] circlechat agent-runs worker up, concurrency=10`);
+// The api checks that it sees the files this worker saves (lib/storage-probe.ts).
+void writeStorageProbe("worker").catch((e) => console.error("[worker] storage probe failed", e));
 // The worker runs the review-entry verification pre-check, so it needs the same
 // "here is the judge I will call" line the API prints.
 logJudgeConfigOnce();
