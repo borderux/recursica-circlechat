@@ -248,11 +248,13 @@ describe("every agent reads a request the same way", () => {
     myTasks: [],
   };
 
-  it("the rules are generic, and say the title is a label, a named deliverable is clear, and to ask once", () => {
+  it("the rules are generic: the newest comment is the request, the title a label, asking is the persona's call, and a question is asked once", () => {
     const rules = (bridge as unknown as B).REQUEST_RULES;
-    expect(rules).toContain("the task's title is only a label");
-    expect(rules).toContain("A request that names what to make");
-    expect(rules).toContain("Ask once, in one question, then wait");
+    expect(rules).toContain("On a task it is the person's newest comment; the task's title is only a label");
+    expect(rules).toContain("Whether to ask questions before you start is your persona's call. Follow it.");
+    expect(rules).toContain("When you ask, ask once, then wait quietly for the answer");
+    // The prompt no longer tells an agent not to ask, or to just do it.
+    expect(rules).not.toMatch(/is clear\. Make it|Ask only when|Do exactly this/);
     expect(rules).not.toMatch(/transcript|writer/i);
   });
 
@@ -265,5 +267,6 @@ describe("every agent reads a request the same way", () => {
     // On the task turn, the person's comment leads as the request.
     expect(hermes.indexOf(`THIS TURN'S REQUEST (task "writer test 3", task_demo):`)).toBeLessThan(hermes.indexOf(b.REQUEST_RULES));
     expect(hermes).toContain(`@pat on the task: ${REQUEST}`);
+    for (const p of [hermes, openclaw, heartbeat]) expect(p).not.toContain("Do exactly this");
   });
 });

@@ -1369,20 +1369,21 @@ function taskRequestBlock(packet) {
     ``,
     `THIS TURN'S REQUEST (task "${t.title}", ${t.id}):`,
     ask,
-    `Do exactly this. The conversation history below is background only: an earlier request there is not this turn's request.`,
+    `The conversation history below is background only: an earlier request there is not this turn's request.`,
   ].join("\n");
 }
 
-// How every agent reads a request, on every runtime. Observed: an agent was
-// asked on a task for "one fake 15-minute transcript, 2 speakers, a product
-// demo", saw only the task's title in its first turn, and asked six times in
-// three hours whether the deliverable was a transcript or something else.
+// How every agent reads a request, on every runtime. Observed: an agent saw
+// only a task's title in its first turn, and asked six times in three hours
+// what to make. Whether to ask refining questions before working is the
+// agent's own persona's call: the back-and-forth matters more than speed.
+// These rules only say what the request is, and that a question is asked once.
 const REQUEST_RULES = [
   ``,
   `REQUESTS:`,
-  `  • The request is what a person asked. On a task it is the person's newest comment; the task's title is only a label. Read the request before deciding anything is unclear.`,
-  `  • A request that names what to make (what it is, and its size, people or subject) is clear. Make it, and choose sensible values for anything it leaves out.`,
-  `  • Ask only when something you cannot reasonably choose is missing. Ask once, in one question, then wait: never ask again, rephrase the question, post "waiting for…" notes, or block the task to repeat it. A person's reply wakes you.`,
+  `  • The request is what a person asked. On a task it is the person's newest comment; the task's title is only a label. Read the request before you decide what to do.`,
+  `  • Whether to ask questions before you start is your persona's call. Follow it.`,
+  `  • When you ask, ask once, then wait quietly for the answer: never ask again, rephrase the question, post "waiting for…" notes, or block the task to repeat it. A person's reply wakes you.`,
 ].join("\n");
 
 // For an agent with the deliverables-only setting (agents.config_json
