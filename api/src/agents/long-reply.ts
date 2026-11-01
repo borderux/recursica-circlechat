@@ -11,6 +11,9 @@ export const CHAT_BODY_MAX = 2000;
 export const TASK_BODY_MAX = 6000;
 export const SUMMARY_MAX = 600;
 const LEAD_MAX = 400;
+// The first paragraph and the title line together stay under a
+// deliverables-only agent's summary limit, with the pointer line after them.
+const LEAD_WITH_TITLE_MAX = 480;
 
 // Cut <text> to at most <max> characters at a paragraph break, else a
 // sentence end, else whitespace, never mid-word when it can be helped.
@@ -31,10 +34,33 @@ export function truncateAtBoundary(text: string, max: number): string {
   return s.slice(0, cut).trimEnd();
 }
 
-// The first paragraph of <text>, at most <max> characters.
+// A line that names what the text is: a Markdown heading, or a short line
+// that does not end like a sentence. Not a list item, a warning, or a
+// transcript's "Speaker  00:01:15" line.
+export function isTitleLine(line: string): boolean {
+  const t = String(line ?? "").trim();
+  if (!t || t.length > 120) return false;
+  if (/^#{1,6}\s+\S/.test(t)) return true;
+  if (/[.!?:;,]$/.test(t)) return false;
+  if (/\b\d{1,2}:\d{2}(?::\d{2})?\s*$/.test(t)) return false;
+  if (/^(?:[-*•]\s|\d+[.)]\s|[⚠❗‼])/.test(t)) return false;
+  return /\p{L}/u.test(t);
+}
+
+// What a long reply keeps in the post: its first paragraph, and, when that
+// paragraph has no title and the next one opens with a title line, the
+// title too. Observed: a transcript's post showed only its two-line
+// "synthetic" banner, because the title ("… — interview 1 of 1 — … — 10
+// min") is the next paragraph, so the comment looked empty.
 export function leadOf(text: string, max = LEAD_MAX): string {
   const s = String(text || "").trim();
-  const para = s.split(/\n\s*\n/)[0] || s;
+  const paras = s.split(/\n\s*\n/);
+  const para = paras[0] || s;
+  const title = paras[1]?.trim().split("\n")[0] ?? "";
+  if (paras.length > 1 && !para.split("\n").some(isTitleLine) && isTitleLine(title)) {
+    const lead = `${para.trim()}\n\n${title.trim()}`;
+    if (lead.length <= LEAD_WITH_TITLE_MAX) return lead;
+  }
   return truncateAtBoundary(para, max);
 }
 
