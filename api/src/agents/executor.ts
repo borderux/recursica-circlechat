@@ -56,6 +56,7 @@ import { writeAudit } from "../lib/access-control.js";
 import { enqueueAgentEvent } from "./enqueue.js";
 import { safePublicFetch } from "../lib/safe-fetch.js";
 import { applyCounted } from "../lib/run-outcome.js";
+import { advanceTaskForAgentWork } from "./task-status-follows-work.js";
 import {
   HEARTBEAT_CREATE_TASK_ERROR,
   TASK_ACTIONS,
@@ -1560,18 +1561,21 @@ async function applyOne(
         out.errors.push(`task_comment: ${r.error}`);
         return;
       }
+      let delivered = false;
       if (split.file && ctx.deliverablesOnly) {
         // For a deliverables-only agent the text is the deliverable.
-        await createArtifact({
+        delivered = await createArtifact({
           taskId: a.task_id,
           workspaceId: ws,
           name: split.file.name,
           buffer: Buffer.from(split.file.text, "utf8"),
           contentType: "text/markdown",
           createdBy: agentMemberId,
-        }).catch((e: Error) => out.trace.push(`task_comment artifact ${split.file!.name} failed: ${e.message}`));
+        }).then(() => true, (e: Error) => { out.trace.push(`task_comment artifact ${split.file!.name} failed: ${e.message}`); return false; });
       }
       out.trace.push(`task_comment on ${a.task_id}${safeAttachments.length ? ` (${safeAttachments.length} file${safeAttachments.length === 1 ? "" : "s"})` : ""}`);
+      // The task's status follows the work: In progress, or Review for a deliverable.
+      await advanceTaskForAgentWork(a.task_id, agentMemberId, ws, { deliverable: delivered, text: guard.bodyMd }, out.trace);
       return;
     }
     case "share_to_task": {
@@ -1661,6 +1665,8 @@ async function applyOne(
       out.trace.push(
         `share_to_task on ${a.task_id} (${fetched.length} file${fetched.length === 1 ? "" : "s"}, ${artifactsSaved} artifact${artifactsSaved === 1 ? "" : "s"})`,
       );
+      // The task's status follows the work: In progress, or Review for a deliverable.
+      await advanceTaskForAgentWork(a.task_id, agentMemberId, ws, { deliverable: artifactsSaved > 0, text: bodyMd }, out.trace);
       return;
     }
     case "share_files": {
