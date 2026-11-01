@@ -62,6 +62,8 @@ import {
   isHeartbeatTrigger,
   settledTaskError,
   settledTasksFor,
+  waitingTaskError,
+  waitingTasksFor,
 } from "./settled-work.js";
 
 export interface AgentAttachment {
@@ -717,6 +719,7 @@ export async function applyActions(params: {
   }
 
   const settledAtStart = new Map<string, string | null>();
+  const waitingAtStart = new Map<string, boolean>();
   for (const a of fileActionsFirst(params.actions)) {
     // Server-side belt for action-name paraphrases. The bridge normalizes
     // synonyms (comment_on_task → task_comment, etc.) before actions reach
@@ -771,6 +774,18 @@ export async function applyActions(params: {
         out.errors.push(settledTaskError(a.type, taskId, settledStatus));
         out.trace.push(`${a.type} refused: ${taskId} is settled (${settledStatus})`);
         continue;
+      }
+      // An agent that asked a person waits quietly: a heartbeat turn does not
+      // comment on the task again or move it until a person answers.
+      if (isHeartbeatTrigger(params.trigger) && (a.type === "task_comment" || a.type === "update_task")) {
+        if (!waitingAtStart.has(taskId)) {
+          waitingAtStart.set(taskId, (await waitingTasksFor(agentMember.id, [taskId])).has(taskId));
+        }
+        if (waitingAtStart.get(taskId)) {
+          out.errors.push(waitingTaskError(a.type, taskId));
+          out.trace.push(`${a.type} refused: ${taskId} waits on a person`);
+          continue;
+        }
       }
     }
     try {

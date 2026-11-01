@@ -5,6 +5,7 @@ import { useAgent, useSpectator } from "../lib/hooks";
 import { scrubIds } from "../lib/md";
 import { api, type AgentRun } from "../api/client";
 import Avatar from "../components/Avatar";
+import { AgentQueue } from "../components/AgentQueue";
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function AgentDetailPage() {
@@ -260,6 +261,11 @@ export default function AgentDetailPage() {
               ))}
             </div>
           )}
+        </section>
+
+        <section className="mt-8">
+          <h2 className="text-[11px] uppercase tracking-wider text-[var(--color-muted)] font-mono">Queue</h2>
+          <AgentQueue agentId={agent.id} />
         </section>
 
         <section className="mt-8">

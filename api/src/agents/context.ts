@@ -28,7 +28,7 @@ import { latestVerdictSummary } from "../lib/task-verifier.js";
 import { buildProjectContext } from "../lib/project-files.js";
 import { readWorkspaceText, workspaceRoot } from "../lib/workspace-read.js";
 import { approvalExpiresAt } from "../lib/approval-policy.js";
-import { isHeartbeatTrigger, newWorkMessages, settledTasksFor } from "./settled-work.js";
+import { isHeartbeatTrigger, newWorkMessages, personRequestsFor, settledTasksFor, waitingTasksFor } from "./settled-work.js";
 import type { CloudModelsSetting } from "../lib/cloud-models-rules.js";
 
 export interface MemberInfo {
@@ -277,6 +277,14 @@ export interface ContextPacket {
     labels: string[];
     commentCount: number;
     latestComment: {
+      memberId: string;
+      memberHandle: string;
+      bodyMd: string;
+      ts: string;
+    } | null;
+    // The newest comment by a person: what the task asks for. A heartbeat used
+    // to show only the latest comment, often the agent's own question.
+    request?: {
       memberId: string;
       memberHandle: string;
       bodyMd: string;
@@ -879,12 +887,18 @@ export async function buildContext(opts: {
     : [];
   // A heartbeat's task list leaves out settled tasks: in review, done or
   // cancelled, with no person's comment since (settled-work.ts).
+  // It also leaves out a task waiting on a person's answer to the agent.
   const settledForHeartbeat = heartbeat
     ? await settledTasksFor(agentMemberId, myTaskRows.map((t) => t.id))
     : new Map<string, string>();
+  const waitingForHeartbeat = heartbeat
+    ? await waitingTasksFor(agentMemberId, myTaskRows.map((t) => t.id))
+    : new Set<string>();
   const openMyTaskRows = myTaskRows
-    .filter((t) => t.status !== "done" && !settledForHeartbeat.has(t.id))
+    .filter((t) => t.status !== "done" && !settledForHeartbeat.has(t.id) && !waitingForHeartbeat.has(t.id))
     .slice(0, 12);
+  // Each task's request: the newest comment by a person.
+  const requestByTask = await personRequestsFor(openMyTaskRows.map((t) => t.id));
   const myTaskIdsOpen = openMyTaskRows.map((t) => t.id);
 
   const myLatestComments = myTaskIdsOpen.length
@@ -981,6 +995,17 @@ export async function buildContext(opts: {
             ts: latest.ts.toISOString(),
           }
         : null,
+      request: (() => {
+        const r = requestByTask.get(t.id);
+        return r
+          ? {
+              memberId: r.memberId,
+              memberHandle: memberDirectory[r.memberId]?.handle ?? "a person",
+              bodyMd: r.bodyMd.slice(0, 600),
+              ts: r.ts.toISOString(),
+            }
+          : null;
+      })(),
     };
   });
 

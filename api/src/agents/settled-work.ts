@@ -103,3 +103,98 @@ export async function settledTasksFor(agentMemberId: string, taskIds: string[]):
   }
   return out;
 }
+
+// An agent that asked a person something waits quietly for the answer.
+// Observed: a gpt-oss agent asked what to make, then asked again on five
+// heartbeats over three hours, because each heartbeat showed it the task with
+// its own question as the latest word. A task waits on a person when the
+// agent's newest comment is newer than every person's comment on it, and the
+// task is blocked or that comment asks a question. A person's comment ends the
+// wait (and wakes the agent with a task_comment turn).
+export function taskIsWaiting(t: {
+  status: string;
+  agentCommentAt: Date | null;
+  agentCommentBody: string | null;
+  personCommentAt: Date | null;
+}): boolean {
+  if (!t.agentCommentAt) return false;
+  if (t.personCommentAt && t.personCommentAt >= t.agentCommentAt) return false;
+  return t.status === "blocked" || /\?/.test(t.agentCommentBody ?? "");
+}
+
+export function waitingTaskError(type: string, taskId: string): string {
+  return `waiting_on_person: you asked a person on ${taskId} and nobody has answered yet, so this ${type} did not run. Wait quietly: a person's reply wakes you.`;
+}
+
+// Whether an ambient turn's packet holds any message to talk about.
+export function ambientHasMessages(packet: { inbox?: Array<{ messages?: unknown[] }> }): boolean {
+  return (packet.inbox ?? []).some((c) => (c.messages?.length ?? 0) > 0);
+}
+
+// The tasks among <taskIds> that wait on a person's answer to the agent.
+export async function waitingTasksFor(agentMemberId: string, taskIds: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const ids = [...new Set(taskIds.filter(Boolean))];
+  if (!agentMemberId || !ids.length) return out;
+  const rows = await db.select({ id: tasks.id, status: tasks.status }).from(tasks).where(inArray(tasks.id, ids));
+  for (const r of rows) {
+    const [mine] = await db
+      .select({ ts: taskComments.ts, bodyMd: taskComments.bodyMd })
+      .from(taskComments)
+      .where(and(eq(taskComments.taskId, r.id), eq(taskComments.memberId, agentMemberId)))
+      .orderBy(desc(taskComments.ts))
+      .limit(1);
+    if (!mine) continue;
+    const [person] = await db
+      .select({ ts: sql<Date>`max(${taskComments.ts})` })
+      .from(taskComments)
+      .innerJoin(members, eq(members.id, taskComments.memberId))
+      .where(and(eq(taskComments.taskId, r.id), eq(members.kind, "user")));
+    const waiting = taskIsWaiting({
+      status: r.status,
+      agentCommentAt: mine.ts,
+      agentCommentBody: mine.bodyMd,
+      personCommentAt: person?.ts ? new Date(person.ts) : null,
+    });
+    if (waiting) out.add(r.id);
+  }
+  return out;
+}
+
+// The newest comment by a person on each task: the request, which a
+// heartbeat's task list shows next to the agent's own latest word.
+export async function personRequestsFor(
+  taskIds: string[],
+): Promise<Map<string, { memberId: string; bodyMd: string; ts: Date }>> {
+  const out = new Map<string, { memberId: string; bodyMd: string; ts: Date }>();
+  const ids = [...new Set(taskIds.filter(Boolean))];
+  if (!ids.length) return out;
+  const rows = await db
+    .select({ taskId: taskComments.taskId, memberId: taskComments.memberId, bodyMd: taskComments.bodyMd, ts: taskComments.ts })
+    .from(taskComments)
+    .innerJoin(members, eq(members.id, taskComments.memberId))
+    .where(and(inArray(taskComments.taskId, ids), eq(members.kind, "user")))
+    .orderBy(desc(taskComments.ts));
+  for (const r of rows) if (!out.has(r.taskId)) out.set(r.taskId, r);
+  return out;
+}
+
+// Where "new since the last turn" starts: when the agent's last real turn
+// started. A turn reads the workspace when it starts, so whatever arrived
+// during it is still new. A run that never reached the model (skipped, held
+// in the queue, refused as busy) does not count. The cursor used to be the
+// previous run's finish, whatever that run was: a request refused as busy
+// 48 ms after a person's comment hid the comment from every later heartbeat.
+export function heartbeatCursor(
+  runs: Array<{ startedAt: Date; status: string; errorText: string | null; resultJson: unknown; contextJson: unknown }>,
+): Date | null {
+  const real = runs
+    .filter((r) => {
+      if (!["ok", "failed", "cancelled"].includes(r.status)) return false;
+      if (!r.contextJson || typeof r.contextJson !== "object" || !Object.keys(r.contextJson).length) return false;
+      if ((r.resultJson as { skipped?: unknown } | null)?.skipped) return false;
+      return !(r.errorText ?? "").startsWith("agent_busy");
+    })
+    .sort((a, b) => +b.startedAt - +a.startedAt);
+  return real[0]?.startedAt ?? null;
+}

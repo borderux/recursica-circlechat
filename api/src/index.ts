@@ -37,6 +37,7 @@ import needsYouRoutes from "./routes/needs-you.js";
 import enterpriseRoutes, { enterprisePublicRoutes, serviceApiRoutes } from "./routes/enterprise.js";
 import { fileServeRoutes, fileDirectoryRoutes } from "./routes/files.js";
 import cloudModelsRoutes from "./routes/cloud-models.js";
+import agentQueueRoutes from "./routes/agent-queue.js";
 import eventsWs from "./ws/events.js";
 import agentSocketWs from "./ws/agent-socket.js";
 import { logJudgeConfigOnce } from "./lib/task-verifier.js";
@@ -185,6 +186,7 @@ await app.register(enterprisePublicRoutes, { prefix: "/api" });
 await app.register(serviceApiRoutes, { prefix: "/api" });
 await app.register(fileDirectoryRoutes, { prefix: "/api" });
 await app.register(cloudModelsRoutes, { prefix: "/api" }); // Fork
+await app.register(agentQueueRoutes, { prefix: "/api" }); // Fork
 // Auth-checked file serving — registered at root so URLs are /files/<key>
 // and not /api/files/<key>. Must run before fastifyStatic so the route matches.
 await app.register(fileServeRoutes);
