@@ -989,3 +989,84 @@ export function checkReplyBody(
   }
   return { ok: true, bodyMd: prose.text };
 }
+
+// ───────────────── a refused reply's prose ─────────────────
+// A reply refused for pasted code can still hold what a person needs: what was
+// built, and where to look at it. Posting nothing leaves the person with no
+// answer at all. withoutPastedCode takes the code out (fenced blocks, diff
+// hunks and their headers) and keeps the prose, plus each preview address the
+// reply named, even one that sat inside the removed code. The result goes
+// through checkReplyBody again, so it posts only when it would pass on its own.
+
+// The refusals withoutPastedCode applies to.
+export const PASTED_CODE_REASONS: ReadonlySet<string> = new Set(["code_diff_leak"]);
+
+export interface CodeRemoval {
+  // Fenced blocks, and lines removed in all (a block's lines included).
+  blocks: number;
+  lines: number;
+  chars: number;
+  // Preview addresses added back because the remaining prose did not name them.
+  previewsKept: number;
+}
+
+const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})/;
+// A diff line: its sign glued to the content, or standing alone ("+x", "-x", "+").
+const GLUED_DIFF_LINE_RE = /^[+-](?:\S|\s*$)/;
+// "+ anything" is a diff line; "- " is a list item unless code follows.
+const SPACED_DIFF_LINE_RE =
+  /^\s*(?:\+\s|-\s+(?:import |const |let |var |function |def |class |return |<\/?[a-z][\w-]*[\s>/]|\/\/|\/\*|<!--))/;
+const DIFF_HEADER_RE =
+  /^\s*(?:@@ .* @@|diff --git |index [0-9a-f]+\.\.[0-9a-f]+|--- (?:a\/|\/dev\/null)|\+\+\+ (?:b\/|\/dev\/null)|\*\*\* (?:Begin Patch|End Patch|Update File:|Add File:|Delete File:))/;
+const PREVIEW_URL_RE = /https?:\/\/[^\s<>()`"'\]]*preview[^\s<>()`"'\]]*/gi;
+const PREVIEW_PATH_RE = /(?<![\w.:/-])\/preview(?:\/[\w\-.~%/]*)?/gi;
+
+function previewAddresses(s: string): string[] {
+  const found = [...(s.match(PREVIEW_URL_RE) ?? []), ...(s.match(PREVIEW_PATH_RE) ?? [])]
+    .map((a) => a.replace(/[.,;:!?)]+$/, ""));
+  const out: string[] = [];
+  for (const a of found) {
+    // A path that is part of a URL already kept counts once.
+    if (!out.some((o) => o === a || o.endsWith(a))) out.push(a);
+  }
+  return out;
+}
+
+export function withoutPastedCode(
+  bodyMd: string,
+  opts?: { hasAttachments?: boolean; allowShort?: boolean },
+): { bodyMd: string; removal: CodeRemoval } | null {
+  const lines = scrubSecrets(bodyMd).split(/\r?\n/);
+  const previews = previewAddresses(lines.join("\n"));
+  const kept: string[] = [];
+  let blocks = 0, removedLines = 0, removedChars = 0;
+  let fence: string | null = null;
+  for (const line of lines) {
+    if (fence) {
+      removedLines++; removedChars += line.length + 1;
+      if (line.trim().startsWith(fence) && line.trim().replace(/[`~]/g, "") === "") fence = null;
+      continue;
+    }
+    const open = FENCE_OPEN_RE.exec(line);
+    if (open) {
+      // An unclosed fence runs to the end of the reply.
+      fence = open[1]; blocks++; removedLines++; removedChars += line.length + 1;
+      continue;
+    }
+    if (GLUED_DIFF_LINE_RE.test(line) || SPACED_DIFF_LINE_RE.test(line) || DIFF_HEADER_RE.test(line)) {
+      removedLines++; removedChars += line.length + 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (!removedLines) return null;
+  let prose = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  // A sentence that only introduced the removed code ("Here's the code:") now points at nothing.
+  prose = prose.replace(/(?:^|\n)[^\n]*\b(?:here(?:'s| is| are)|below is|the (?:code|diff|patch))\b[^\n]*:\s*$/i, "").trim();
+  const missing = previews.filter((p) => !prose.includes(p));
+  if (!prose && !missing.length) return null;
+  const body = [prose, ...missing.map((p) => `Preview: ${p}`)].filter(Boolean).join("\n\n");
+  const again = checkReplyBody(body, opts);
+  if (!again.ok) return null;
+  return { bodyMd: again.bodyMd, removal: { blocks, lines: removedLines, chars: removedChars, previewsKept: missing.length } };
+}

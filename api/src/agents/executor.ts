@@ -15,7 +15,7 @@ import {
 import { audit } from "../lib/audit.js";
 import { id } from "../lib/ids.js";
 import { publishToConversation, publishToWorkspace } from "../lib/events.js";
-import { checkReplyBody, guardRejectHint, sanitizeAgentProse } from "./reply-guard.js";
+import { checkReplyBody, guardRejectHint, sanitizeAgentProse, withoutPastedCode, PASTED_CODE_REASONS, type CodeRemoval, type GuardResult } from "./reply-guard.js";
 import { NO_REPLY_NOTE } from "./waiting.js";
 import { contentTypeForName } from "../lib/content-type.js";
 import { checkRecentDuplicate, checkRecentDuplicateTaskComment } from "./dedupe.js";
@@ -206,6 +206,10 @@ export interface ExecOutcome {
   // reason and never the text. Recorded in the run's result_json, so a host can
   // tell an operator (see DroppedReply).
   dropped?: DroppedReply[];
+  // Each reply posted with its pasted code taken out (withoutPastedCode): where
+  // it went, why, and how much was removed, never the code. Recorded in the
+  // run's result_json as codeRemoved.
+  codeRemoved?: CodeRemovedReply[];
   // The conversations a post reached during this run. Internal to applyActions.
   posted?: Set<string>;
 }
@@ -214,6 +218,34 @@ export interface ExecOutcome {
 export interface DroppedReply {
   conversationId: string | null;
   reason: string;
+}
+
+// A reply the guard refused for pasted code, posted with the code taken out.
+export interface CodeRemovedReply extends CodeRemoval {
+  surface: "message" | "task_comment";
+  conversationId: string | null;
+  taskId?: string;
+  reason: string;
+}
+
+// The guard's verdict on a reply, with the pasted code taken out when that is
+// all that kept it from posting. The removal is recorded on the run.
+export function guardKeepingProse(
+  bodyMd: string,
+  opts: { hasAttachments?: boolean; allowShort?: boolean },
+  out: ExecOutcome,
+  where: { surface: "message" | "task_comment"; conversationId: string | null; taskId?: string },
+): GuardResult {
+  const guard = checkReplyBody(bodyMd, opts);
+  if (guard.ok || !PASTED_CODE_REASONS.has(guard.reason)) return guard;
+  const kept = withoutPastedCode(bodyMd, opts);
+  if (!kept) return guard;
+  (out.codeRemoved ??= []).push({ ...where, reason: guard.reason, ...kept.removal });
+  const at = where.taskId ?? where.conversationId ?? "";
+  out.trace.push(
+    `${where.surface === "message" ? "post_message" : "task_comment"}: ${guard.reason}; removed ${kept.removal.lines} line(s) of code${at ? ` for ${at}` : ""} and posted the prose`,
+  );
+  return { ok: true, bodyMd: kept.bodyMd };
 }
 
 // What applyOne knows about the run beyond the action itself. `waitingIn` is the
@@ -891,7 +923,7 @@ async function applyOne(
       // A person waiting in this conversation may get a short reply, such as a
       // greeting. A post nobody asked for keeps the length floor.
       const allowShort = Boolean(ctx.waitingIn) && a.conversation_id === ctx.waitingIn;
-      const guard = checkReplyBody(a.body_md, { hasAttachments, allowShort });
+      const guard = guardKeepingProse(a.body_md, { hasAttachments, allowShort }, out, { surface: "message", conversationId: a.conversation_id ?? null });
       if (!guard.ok && guard.reason === "attachment_claim_no_file") {
         // The claim is not posted. A note says what did not attach, so nobody
         // waits on files that do not exist.
@@ -1508,7 +1540,7 @@ async function applyOne(
       const ws = await loadAgentWorkspace(agentMemberId);
       if (!ws) throw new Error("agent_workspace_missing");
       const hasAttachments = (Array.isArray(a.attachments) && a.attachments.length > 0) || (ctx.filesAttached ?? 0) > 0;
-      const guard = checkReplyBody(a.body_md, { hasAttachments });
+      const guard = guardKeepingProse(a.body_md, { hasAttachments }, out, { surface: "task_comment", conversationId: null, taskId: a.task_id });
       if (!guard.ok) {
         out.errors.push(
           `task_comment rejected: ${guard.reason}.${guardRejectHint(guard.reason)}`,
