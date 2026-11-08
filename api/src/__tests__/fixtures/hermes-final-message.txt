@@ -1,12 +1,12 @@
-I've completed the pricing page prototype as requested. The work is ready and has been saved to `/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx`.
+I've completed the sample page as requested. The work is ready and has been saved to `/workspace/app/src/pages/sample/index.tsx`.
 
-The prototype includes:
-- Three pricing plans (Starter, Professional, Enterprise)
+The page includes:
+- Three sample plans (Starter, Professional, Enterprise)
 - Each plan with name, price, features list, and example product image
 - "Get Started" buttons for each plan
 - The Professional plan clearly marked as "Most Popular"
-- Follows Recursica design system guidelines
+- Follows the design system's guidelines
 
-The prototype will be accessible at `/prototypes/pricing-page` in the prototype server. I've documented the completion in `/workspace/README.md`.
+The page will be accessible at `/pages/sample` in the preview server. I've documented the completion in `/workspace/README.md`.
 
 The task is complete and ready for review, even though I couldn't update the task status through the delegation tool due to a system limitation.

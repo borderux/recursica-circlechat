@@ -46,8 +46,8 @@ beforeAll(async () => {
 const FIXTURES = join(__dirname, "fixtures");
 const CONSOLE = readFileSync(join(FIXTURES, "hermes-console-file-writes.txt"), "utf8");
 const FINAL = readFileSync(join(FIXTURES, "hermes-final-message.txt"), "utf8");
-const SESSION_ID = "20261108_183828_5f2e9a";
-const TURN_STARTED = 1794163100;
+const SESSION_ID = "20260101_120000_abc123";
+const TURN_STARTED = 1767268800;
 
 // What the bridge posted before: the console without the diff header lines it already dropped.
 const OLD_BODY = CONSOLE.split("\n")
@@ -58,7 +58,7 @@ const OLD_BODY = CONSOLE.split("\n")
 const SIGNED_LINES_AND_ANSWER = `${CONSOLE.slice(0, CONSOLE.indexOf(FINAL)).split("\n").filter((l) => /^[+-](?![+-]{2} )/.test(l)).join("\n")}\n\n${FINAL}`;
 // The console's text once the diffs are dropped: the answer, as the bridge's text rewrites leave it.
 const answered = (text: string) => {
-  expect(text).toContain("I've completed the pricing page prototype as requested.");
+  expect(text).toContain("I've completed the sample page as requested.");
   expect(text).toContain("The task is complete and ready for review");
   expect(text).not.toMatch(/^[-+ ]\s*(?:<|import |const |\}|Table)/m);
   expect(checkReplyBody(text)).toMatchObject({ ok: true });
@@ -83,17 +83,17 @@ function writeSessions(rows: Array<{ id: string; source: string; startedAt: numb
 }
 const WRITE_CALL = JSON.stringify([{ type: "function", function: { name: "write_file", arguments: "{}" } }]);
 const turnMessages = (last: { content: string | null; toolCalls?: string }) => [
-  { role: "user", content: "You are the designer…" },
+  { role: "user", content: "You are an agent…" },
   { role: "assistant", content: "Let me first look at the project structure:", toolCalls: WRITE_CALL },
   { role: "tool", content: "{\"bytes_written\": 3670}" },
-  { role: "assistant", content: "I've successfully created a pricing page prototype with three plans.", toolCalls: WRITE_CALL },
+  { role: "assistant", content: "I've successfully created a sample page with three plans.", toolCalls: WRITE_CALL },
   { role: "tool", content: "{\"bytes_written\": 3183}" },
   { role: "assistant", ...last },
 ];
 
 beforeEach(async () => {
   homes = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "hermes-homes-")));
-  home = join(homes, ".hermes-designer");
+  home = join(homes, "agent-a");
   await fs.mkdir(home);
 });
 afterEach(async () => {
@@ -176,7 +176,7 @@ describe("an agent's state.db that is not its own regular file", () => {
     return r;
   };
   const otherHome = async () => {
-    const other = join(homes, ".hermes-reviewer");
+    const other = join(homes, "agent-b");
     await fs.mkdir(other);
     writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: OTHER_FINAL }) }], other);
     return other;
@@ -217,7 +217,7 @@ describe("an agent's state.db that is not its own regular file", () => {
     await fs.symlink(join(other, "state.db-wal"), join(home, "state.db-wal"));
     await fallsBack(/^state\.db-wal is a link$/);
     await fs.rm(join(home, "state.db-wal"));
-    const linkedHome = join(homes, ".hermes-linked");
+    const linkedHome = join(homes, "agent-a-link");
     await fs.symlink(home, linkedHome);
     const r = await bridge.hermesTurnReply({ stdout: CONSOLE, hermesHome: linkedHome, startedSec: TURN_STARTED });
     expect(r).toMatchObject({ fromSession: false, sessionSkip: "the home's path holds a link" });
@@ -242,7 +242,7 @@ describe("the console's diffs after a file write", () => {
   });
 
   it("leave a reply without a diff unchanged, its list included", () => {
-    const reply = "Built the page.\n\n- three plans\n- a button for each\n\nIt is at /prototypes/pricing-page.";
+    const reply = "Built the page.\n\n- three plans\n- a button for each\n\nIt is at /pages/sample.";
     expect(bridge.dropFileWriteDiffs(reply)).toBe(reply);
   });
 });
@@ -252,8 +252,8 @@ describe("the prose-keeper removes every line the code check counts", () => {
     expect(checkReplyBody(SIGNED_LINES_AND_ANSWER)).toEqual({ ok: false, reason: "code_diff_leak" });
     const kept = withoutPastedCode(SIGNED_LINES_AND_ANSWER);
     expect(kept).not.toBeNull();
-    expect(kept!.bodyMd).toContain("I've completed the pricing page prototype as requested.");
-    expect(kept!.bodyMd).toContain("`/prototypes/pricing-page`");
+    expect(kept!.bodyMd).toContain("I've completed the sample page as requested.");
+    expect(kept!.bodyMd).toContain("`/pages/sample`");
     for (const line of kept!.bodyMd.split("\n")) {
       expect(line).not.toMatch(/^\s*[+-]\s*(?:import |const |<\/?[a-z])/i);
     }
@@ -266,10 +266,10 @@ describe("the prose-keeper removes every line the code check counts", () => {
       "-        <Text align=\"center\">",
       "  + const plans = loadPlans();",
       "-  Import { Card } from \"./ui\";",
-      "The page is built and opens at /preview/pricing-page.",
+      "The page is built and opens at /preview/sample-page.",
     ].join("\n");
     expect(checkReplyBody(body)).toEqual({ ok: false, reason: "code_diff_leak" });
-    expect(withoutPastedCode(body)!.bodyMd).toBe("The page is built and opens at /preview/pricing-page.");
+    expect(withoutPastedCode(body)!.bodyMd).toBe("The page is built and opens at /preview/sample-page.");
   });
 });
 
@@ -278,23 +278,23 @@ describe("a task turn's refused comment", () => {
 
   it("is saved on the run with the start of its text, secrets redacted", () => {
     const o = out();
-    recordRefusal(o, "task_pricing", "code_diff_leak", `token cc_a1b2c3d4e5f6a1b2c3d4e5f6\n${OLD_BODY}`);
+    recordRefusal(o, "task_sample", "code_diff_leak", `token cc_a1b2c3d4e5f6a1b2c3d4e5f6\n${OLD_BODY}`);
     expect(o.refused).toHaveLength(1);
-    expect(o.refused![0]).toMatchObject({ surface: "task_comment", taskId: "task_pricing", reason: "code_diff_leak" });
+    expect(o.refused![0]).toMatchObject({ surface: "task_comment", taskId: "task_sample", reason: "code_diff_leak" });
     expect(o.refused![0].excerpt).toHaveLength(REFUSED_EXCERPT_CHARS);
     const saved = refusedForRun(o.refused);
     expect(saved[0].excerpt).not.toContain("a1b2c3d4e5f6a1b2c3d4e5f6");
-    expect(saved[0].excerpt).toContain("import { Prototype }");
+    expect(saved[0].excerpt).toContain("import { PageFrame }");
   });
 
   it("gets a note on the task saying why, unless a comment of the run reached the task", () => {
     const o = out();
-    recordRefusal(o, "task_pricing", "code_diff_leak", OLD_BODY);
-    expect(refusalNeedingNote("task_pricing", o)?.reason).toBe("code_diff_leak");
+    recordRefusal(o, "task_sample", "code_diff_leak", OLD_BODY);
+    expect(refusalNeedingNote("task_sample", o)?.reason).toBe("code_diff_leak");
     expect(refusalNeedingNote(null, o)).toBeUndefined();
     expect(refusalNeedingNote("task_other", o)).toBeUndefined();
-    expect(refusalNeedingNote("task_pricing", { ...o, commented: new Set(["task_pricing"]) })).toBeUndefined();
-    expect(refusalNeedingNote("task_pricing", out())).toBeUndefined();
+    expect(refusalNeedingNote("task_sample", { ...o, commented: new Set(["task_sample"]) })).toBeUndefined();
+    expect(refusalNeedingNote("task_sample", out())).toBeUndefined();
   });
 
   it("says why in plain words and where the text is kept", () => {

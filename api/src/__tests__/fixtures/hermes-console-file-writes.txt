@@ -1,9 +1,9 @@
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
 --- /dev/null
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -0,0 +1,133 @@
-+import { Prototype } from "../../Prototype";
++import { PageFrame } from "../../PageFrame";
 +import {
 +  Table,
 +  Text,
@@ -15,9 +15,9 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +  Title,
 +  Divider,
 +  Box,
-+} from "@recursica/adapter-mantine-v8";
++} from "@example/ui-kit";
 +
-+const PricingPage = () => {
++const SamplePage = () => {
 +  const plans = [
 +    {
 +      id: 1,
@@ -55,14 +55,14 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +  ];
 +
 +  return (
-+    <Prototype>
++    <PageFrame>
 +      <Container size="lg" py="xl">
 +        <Title order={1} ta="center" mb="xl">
 +          Choose Your Plan
 +        </Title>
 +        
 +        <Text ta="center" mb="xl">
-+          Simple, transparent pricing for everyone
++          Simple, transparent sample for everyone
 +        </Text>
 +
 +        <Box miw="100%">
@@ -106,7 +106,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +                    <Card shadow="sm" padding="lg" radius="md" withBorder>
 +                      <Card.Section>
 +                        <img
-+                          src="https://cataas.com/cat?width=200&height=150"
++                          src="https://example.com/plan.png"
 +                          alt="Product example"
 +                        />
 +                      </Card.Section>
@@ -131,16 +131,16 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +          </Table>
 +        </Box>
 +      </Container>
-+    </Prototype>
++    </PageFrame>
 +  );
 +};
 +
-+export default PricingPage;
++export default SamplePage;
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -3,10 +3,10 @@
    Table,
    Text,
@@ -155,9 +155,9 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
    Box,
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -7,9 +7,6 @@
    Card,
    Container,
@@ -165,12 +165,12 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 -  Title,
 -  Divider,
 -  Box,
- } from "@recursica/adapter-mantine-v8";
+ } from "@example/ui-kit";
  
- const PricingPage = () => {
+ const SamplePage = () => {
 @@ -52,79 +49,77 @@
    return (
-     <Prototype>
+     <PageFrame>
        <Container size="lg" py="xl">
 -        <Title order={1} ta="center" mb="xl">
 +        <Text ta="center" mb="xl" size="xl" fw="bold">
@@ -179,7 +179,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +        </Text>
          
          <Text ta="center" mb="xl">
-           Simple, transparent pricing for everyone
+           Simple, transparent sample for everyone
          </Text>
  
 -        <Box miw="100%">
@@ -239,7 +239,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 -                    <Card shadow="sm" padding="lg" radius="md" withBorder>
 -                      <Card.Section>
 -                        <img
--                          src="https://cataas.com/cat?width=200&height=150"
+-                          src="https://example.com/plan.png"
 -                          alt="Product example"
 -                        />
 -                      </Card.Section>
@@ -286,7 +286,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +                  <Card shadow="sm" padding="lg" radius="md" withBorder>
 +                    <Card.Section>
 +                      <img
-+                        src="https://cataas.com/cat?width=200&height=150"
++                        src="https://example.com/plan.png"
 +                        alt="Product example"
 +                      />
 +                    </Card.Section>
@@ -310,16 +310,16 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +          </Table.Tbody>
 +        </Table>
        </Container>
-     </Prototype>
+     </PageFrame>
    );
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -49,7 +49,7 @@
    return (
-     <Prototype>
+     <PageFrame>
        <Container size="lg" py="xl">
 -        <Text ta="center" mb="xl" size="xl" fw="bold">
 +        <Text ta="center" mb="xl" fw="bold">
@@ -337,12 +337,12 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
                        /month
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -49,11 +49,11 @@
    return (
-     <Prototype>
+     <PageFrame>
        <Container size="lg" py="xl">
 -        <Text ta="center" mb="xl" fw="bold">
 +        <Text ta="center">
@@ -351,7 +351,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
          
 -        <Text ta="center" mb="xl">
 +        <Text ta="center">
-           Simple, transparent pricing for everyone
+           Simple, transparent sample for everyone
          </Text>
  
 @@ -63,15 +63,15 @@
@@ -376,13 +376,13 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
                    </Text>
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -48,12 +48,12 @@
  
    return (
-     <Prototype>
+     <PageFrame>
 -      <Container size="lg" py="xl">
 -        <Text ta="center">
 +      <Container size="lg">
@@ -392,7 +392,7 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
          
 -        <Text ta="center">
 +        <Text align="center">
-           Simple, transparent pricing for everyone
+           Simple, transparent sample for everyone
          </Text>
  
 @@ -62,14 +62,14 @@
@@ -442,20 +442,20 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
                      fullWidth
 
   ┊ review diff
-a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx → b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
---- a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
-+++ b/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
 @@ -6,7 +6,6 @@
    Button,
    Card,
    Container,
 -  Group,
- } from "@recursica/adapter-mantine-v8";
+ } from "@example/ui-kit";
  
- const PricingPage = () => {
+ const SamplePage = () => {
 @@ -49,27 +48,21 @@
    return (
-     <Prototype>
+     <PageFrame>
        <Container size="lg">
 -        <Text align="center">
 -          Choose Your Plan
@@ -463,9 +463,9 @@ a/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx
 +        <Text>Choose Your Plan</Text>
          
 -        <Text align="center">
--          Simple, transparent pricing for everyone
+-          Simple, transparent sample for everyone
 -        </Text>
-+        <Text>Simple, transparent pricing for everyone</Text>
++        <Text>Simple, transparent sample for everyone</Text>
  
          <Table>
            <Table.Thead>
@@ -522,28 +522,28 @@ a/workspace/README.md → b/workspace/README.md
 --- /dev/null
 +++ b/workspace/README.md
 @@ -0,0 +1,10 @@
-+I've created a pricing page prototype with three plans and "Get Started" buttons as requested.
++I've created a sample page with three plans and "Get Started" buttons as requested.
 +
 +The implementation features:
 +- Three distinct plans (Starter, Professional, Enterprise) 
 +- Each plan shows name, price, features list, and example product image
 +- A "Get Started" button for each plan
 +- The Professional plan clearly marked as "Most Popular"
-+- Clean layout following Recursica design system guidelines
++- Clean layout following the design system's guidelines
 +
-+The prototype has been created in /workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx and is ready for review. It will be accessible at /prototypes/pricing-page in the prototype server.
++The page has been created in /workspace/app/src/pages/sample/index.tsx and is ready for review. It will be accessible at /pages/sample in the preview server.
 
-I've completed the pricing page prototype as requested. The work is ready and has been saved to `/workspace/recursica-proto-mantine/src/routes/prototypes/pricing-page/index.tsx`.
+I've completed the sample page as requested. The work is ready and has been saved to `/workspace/app/src/pages/sample/index.tsx`.
 
-The prototype includes:
-- Three pricing plans (Starter, Professional, Enterprise)
+The page includes:
+- Three sample plans (Starter, Professional, Enterprise)
 - Each plan with name, price, features list, and example product image
 - "Get Started" buttons for each plan
 - The Professional plan clearly marked as "Most Popular"
-- Follows Recursica design system guidelines
+- Follows the design system's guidelines
 
-The prototype will be accessible at `/prototypes/pricing-page` in the prototype server. I've documented the completion in `/workspace/README.md`.
+The page will be accessible at `/pages/sample` in the preview server. I've documented the completion in `/workspace/README.md`.
 
 The task is complete and ready for review, even though I couldn't update the task status through the delegation tool due to a system limitation.
 
-session_id: 20261108_183828_5f2e9a
+session_id: 20260101_120000_abc123
