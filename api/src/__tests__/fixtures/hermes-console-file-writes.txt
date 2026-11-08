@@ -1,0 +1,549 @@
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- /dev/null
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -0,0 +1,133 @@
++import { PageFrame } from "../../PageFrame";
++import {
++  Table,
++  Text,
++  Badge,
++  Group,
++  Button,
++  Card,
++  Container,
++  Title,
++  Divider,
++  Box,
++} from "@example/ui-kit";
++
++const SamplePage = () => {
++  const plans = [
++    {
++      id: 1,
++      name: "Starter",
++      price: "$9",
++      features: ["Up to 5 projects", "Basic analytics", "Email support"],
++      isPopular: false,
++    },
++    {
++      id: 2,
++      name: "Professional",
++      price: "$29",
++      features: [
++        "Unlimited projects",
++        "Advanced analytics",
++        "Priority support",
++        "Custom integrations",
++      ],
++      isPopular: true,
++    },
++    {
++      id: 3,
++      name: "Enterprise",
++      price: "$99",
++      features: [
++        "Unlimited projects",
++        "Advanced analytics",
++        "24/7 dedicated support",
++        "Custom integrations",
++        "On-premise deployment",
++        "SLA guarantee",
++      ],
++      isPopular: false,
++    },
++  ];
++
++  return (
++    <PageFrame>
++      <Container size="lg" py="xl">
++        <Title order={1} ta="center" mb="xl">
++          Choose Your Plan
++        </Title>
++        
++        <Text ta="center" mb="xl">
++          Simple, transparent sample for everyone
++        </Text>
++
++        <Box miw="100%">
++          <Table>
++            <Table.Thead>
++              <Table.Tr>
++                <Table.Th></Table.Th>
++                {plans.map((plan) => (
++                  <Table.Th key={plan.id} ta="center">
++                    <Group justify="center">
++                      <Title order={3}>{plan.name}</Title>
++                      {plan.isPopular && (
++                        <Badge color="blue">Most Popular</Badge>
++                      )}
++                    </Group>
++                    <Text size="xl" fw="bold" ta="center" mt="sm">
++                      {plan.price}
++                      <Text component="span" size="sm" c="dimmed">
++                        /month
++                      </Text>
++                    </Text>
++                  </Table.Th>
++                ))}
++              </Table.Tr>
++            </Table.Thead>
++            <Table.Tbody>
++              <Table.Tr>
++                <Table.Td>Features</Table.Td>
++                {plans.map((plan) => (
++                  <Table.Td key={plan.id} ta="center">
++                    {plan.features.map((feature, index) => (
++                      <Text key={index}>{feature}</Text>
++                    ))}
++                  </Table.Td>
++                ))}
++              </Table.Tr>
++              <Table.Tr>
++                <Table.Td>Example Product</Table.Td>
++                {plans.map((plan) => (
++                  <Table.Td key={plan.id} ta="center">
++                    <Card shadow="sm" padding="lg" radius="md" withBorder>
++                      <Card.Section>
++                        <img
++                          src="https://example.com/plan.png"
++                          alt="Product example"
++                        />
++                      </Card.Section>
++                    </Card>
++                  </Table.Td>
++                ))}
++              </Table.Tr>
++              <Table.Tr>
++                <Table.Td></Table.Td>
++                {plans.map((plan) => (
++                  <Table.Td key={plan.id} ta="center">
++                    <Button
++                      variant={plan.isPopular ? "filled" : "outline"}
++                      fullWidth
++                    >
++                      Get Started
++                    </Button>
++                  </Table.Td>
++                ))}
++              </Table.Tr>
++            </Table.Tbody>
++          </Table>
++        </Box>
++      </Container>
++    </PageFrame>
++  );
++};
++
++export default SamplePage;
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -3,10 +3,10 @@
+   Table,
+   Text,
+   Badge,
+-  Group,
+   Button,
+   Card,
+   Container,
++  Group,
+   Title,
+   Divider,
+   Box,
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -7,9 +7,6 @@
+   Card,
+   Container,
+   Group,
+-  Title,
+-  Divider,
+-  Box,
+ } from "@example/ui-kit";
+ 
+ const SamplePage = () => {
+@@ -52,79 +49,77 @@
+   return (
+     <PageFrame>
+       <Container size="lg" py="xl">
+-        <Title order={1} ta="center" mb="xl">
++        <Text ta="center" mb="xl" size="xl" fw="bold">
+           Choose Your Plan
+-        </Title>
++        </Text>
+         
+         <Text ta="center" mb="xl">
+           Simple, transparent sample for everyone
+         </Text>
+ 
+-        <Box miw="100%">
+-          <Table>
+-            <Table.Thead>
+-              <Table.Tr>
+-                <Table.Th></Table.Th>
+-                {plans.map((plan) => (
+-                  <Table.Th key={plan.id} ta="center">
+-                    <Group justify="center">
+-                      <Title order={3}>{plan.name}</Title>
+-                      {plan.isPopular && (
+-                        <Badge color="blue">Most Popular</Badge>
+-                      )}
+-                    </Group>
+-                    <Text size="xl" fw="bold" ta="center" mt="sm">
+-                      {plan.price}
+-                      <Text component="span" size="sm" c="dimmed">
+-                        /month
+-                      </Text>
++        <Table>
++          <Table.Thead>
++            <Table.Tr>
++              <Table.Th></Table.Th>
++              {plans.map((plan) => (
++                <Table.Th key={plan.id} ta="center">
++                  <Group justify="center" gap="xs">
++                    <Text fw="bold">{plan.name}</Text>
++                    {plan.isPopular && (
++                      <Badge color="blue">Most Popular</Badge>
++                    )}
++                  </Group>
++                  <Text size="xl" fw="bold" ta="center" mt="sm">
++                    {plan.price}
++                    <Text component="span" size="sm" c="dimmed">
++                      /month
+                     </Text>
+-                  </Table.Th>
+-                ))}
+-              </Table.Tr>
+-            </Table.Thead>
+-            <Table.Tbody>
+-              <Table.Tr>
+-                <Table.Td>Features</Table.Td>
+-                {plans.map((plan) => (
+-                  <Table.Td key={plan.id} ta="center">
+-                    {plan.features.map((feature, index) => (
+-                      <Text key={index}>{feature}</Text>
+-                    ))}
+-                  </Table.Td>
+-                ))}
+-              </Table.Tr>
+-              <Table.Tr>
+-                <Table.Td>Example Product</Table.Td>
+-                {plans.map((plan) => (
+-                  <Table.Td key={plan.id} ta="center">
+-                    <Card shadow="sm" padding="lg" radius="md" withBorder>
+-                      <Card.Section>
+-                        <img
+-                          src="https://example.com/plan.png"
+-                          alt="Product example"
+-                        />
+-                      </Card.Section>
+-                    </Card>
+-                  </Table.Td>
+-                ))}
+-              </Table.Tr>
+-              <Table.Tr>
+-                <Table.Td></Table.Td>
+-                {plans.map((plan) => (
+-                  <Table.Td key={plan.id} ta="center">
+-                    <Button
+-                      variant={plan.isPopular ? "filled" : "outline"}
+-                      fullWidth
+-                    >
+-                      Get Started
+-                    </Button>
+-                  </Table.Td>
+-                ))}
+-              </Table.Tr>
+-            </Table.Tbody>
+-          </Table>
+-        </Box>
++                  </Text>
++                </Table.Th>
++              ))}
++            </Table.Tr>
++          </Table.Thead>
++          <Table.Tbody>
++            <Table.Tr>
++              <Table.Td>Features</Table.Td>
++              {plans.map((plan) => (
++                <Table.Td key={plan.id} ta="center">
++                  {plan.features.map((feature, index) => (
++                    <Text key={index}>{feature}</Text>
++                  ))}
++                </Table.Td>
++              ))}
++            </Table.Tr>
++            <Table.Tr>
++              <Table.Td>Example Product</Table.Td>
++              {plans.map((plan) => (
++                <Table.Td key={plan.id} ta="center">
++                  <Card shadow="sm" padding="lg" radius="md" withBorder>
++                    <Card.Section>
++                      <img
++                        src="https://example.com/plan.png"
++                        alt="Product example"
++                      />
++                    </Card.Section>
++                  </Card>
++                </Table.Td>
++              ))}
++            </Table.Tr>
++            <Table.Tr>
++              <Table.Td></Table.Td>
++              {plans.map((plan) => (
++                <Table.Td key={plan.id} ta="center">
++                  <Button
++                    variant={plan.isPopular ? "filled" : "outline"}
++                    fullWidth
++                  >
++                    Get Started
++                  </Button>
++                </Table.Td>
++              ))}
++            </Table.Tr>
++          </Table.Tbody>
++        </Table>
+       </Container>
+     </PageFrame>
+   );
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -49,7 +49,7 @@
+   return (
+     <PageFrame>
+       <Container size="lg" py="xl">
+-        <Text ta="center" mb="xl" size="xl" fw="bold">
++        <Text ta="center" mb="xl" fw="bold">
+           Choose Your Plan
+         </Text>
+         
+@@ -69,7 +69,7 @@
+                       <Badge color="blue">Most Popular</Badge>
+                     )}
+                   </Group>
+-                  <Text size="xl" fw="bold" ta="center" mt="sm">
++                  <Text fw="bold" ta="center" mt="sm">
+                     {plan.price}
+                     <Text component="span" size="sm" c="dimmed">
+                       /month
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -49,11 +49,11 @@
+   return (
+     <PageFrame>
+       <Container size="lg" py="xl">
+-        <Text ta="center" mb="xl" fw="bold">
++        <Text ta="center">
+           Choose Your Plan
+         </Text>
+         
+-        <Text ta="center" mb="xl">
++        <Text ta="center">
+           Simple, transparent sample for everyone
+         </Text>
+ 
+@@ -63,15 +63,15 @@
+               <Table.Th></Table.Th>
+               {plans.map((plan) => (
+                 <Table.Th key={plan.id} ta="center">
+-                  <Group justify="center" gap="xs">
+-                    <Text fw="bold">{plan.name}</Text>
++                  <Group justify="center">
++                    <Text>{plan.name}</Text>
+                     {plan.isPopular && (
+                       <Badge color="blue">Most Popular</Badge>
+                     )}
+                   </Group>
+-                  <Text fw="bold" ta="center" mt="sm">
++                  <Text fw="bold" ta="center">
+                     {plan.price}
+-                    <Text component="span" size="sm" c="dimmed">
++                    <Text component="span">
+                       /month
+                     </Text>
+                   </Text>
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -48,12 +48,12 @@
+ 
+   return (
+     <PageFrame>
+-      <Container size="lg" py="xl">
+-        <Text ta="center">
++      <Container size="lg">
++        <Text align="center">
+           Choose Your Plan
+         </Text>
+         
+-        <Text ta="center">
++        <Text align="center">
+           Simple, transparent sample for everyone
+         </Text>
+ 
+@@ -62,14 +62,14 @@
+             <Table.Tr>
+               <Table.Th></Table.Th>
+               {plans.map((plan) => (
+-                <Table.Th key={plan.id} ta="center">
+-                  <Group justify="center">
++                <Table.Th key={plan.id} align="center">
++                  <Group position="center">
+                     <Text>{plan.name}</Text>
+                     {plan.isPopular && (
+                       <Badge color="blue">Most Popular</Badge>
+                     )}
+                   </Group>
+-                  <Text fw="bold" ta="center">
++                  <Text fw="bold" align="center">
+                     {plan.price}
+                     <Text component="span">
+                       /month
+@@ -83,7 +83,7 @@
+             <Table.Tr>
+               <Table.Td>Features</Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} ta="center">
++                <Table.Td key={plan.id} align="center">
+                   {plan.features.map((feature, index) => (
+                     <Text key={index}>{feature}</Text>
+                   ))}
+@@ -93,7 +93,7 @@
+             <Table.Tr>
+               <Table.Td>Example Product</Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} ta="center">
++                <Table.Td key={plan.id} align="center">
+                   <Card shadow="sm" padding="lg" radius="md" withBorder>
+                     <Card.Section>
+                       <img
+@@ -108,7 +108,7 @@
+             <Table.Tr>
+               <Table.Td></Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} ta="center">
++                <Table.Td key={plan.id} align="center">
+                   <Button
+                     variant={plan.isPopular ? "filled" : "outline"}
+                     fullWidth
+
+  ┊ review diff
+a/workspace/app/src/pages/sample/index.tsx → b/workspace/app/src/pages/sample/index.tsx
+--- a/workspace/app/src/pages/sample/index.tsx
++++ b/workspace/app/src/pages/sample/index.tsx
+@@ -6,7 +6,6 @@
+   Button,
+   Card,
+   Container,
+-  Group,
+ } from "@example/ui-kit";
+ 
+ const SamplePage = () => {
+@@ -49,27 +48,21 @@
+   return (
+     <PageFrame>
+       <Container size="lg">
+-        <Text align="center">
+-          Choose Your Plan
+-        </Text>
++        <Text>Choose Your Plan</Text>
+         
+-        <Text align="center">
+-          Simple, transparent sample for everyone
+-        </Text>
++        <Text>Simple, transparent sample for everyone</Text>
+ 
+         <Table>
+           <Table.Thead>
+             <Table.Tr>
+               <Table.Th></Table.Th>
+               {plans.map((plan) => (
+-                <Table.Th key={plan.id} align="center">
+-                  <Group position="center">
+-                    <Text>{plan.name}</Text>
+-                    {plan.isPopular && (
+-                      <Badge color="blue">Most Popular</Badge>
+-                    )}
+-                  </Group>
+-                  <Text fw="bold" align="center">
++                <Table.Th key={plan.id}>
++                  <Text>{plan.name}</Text>
++                  {plan.isPopular && (
++                    <Badge color="blue">Most Popular</Badge>
++                  )}
++                  <Text weight="bold">
+                     {plan.price}
+                     <Text component="span">
+                       /month
+@@ -83,7 +76,7 @@
+             <Table.Tr>
+               <Table.Td>Features</Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} align="center">
++                <Table.Td key={plan.id}>
+                   {plan.features.map((feature, index) => (
+                     <Text key={index}>{feature}</Text>
+                   ))}
+@@ -93,7 +86,7 @@
+             <Table.Tr>
+               <Table.Td>Example Product</Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} align="center">
++                <Table.Td key={plan.id}>
+                   <Card shadow="sm" padding="lg" radius="md" withBorder>
+                     <Card.Section>
+                       <img
+@@ -108,7 +101,7 @@
+             <Table.Tr>
+               <Table.Td></Table.Td>
+               {plans.map((plan) => (
+-                <Table.Td key={plan.id} align="center">
++                <Table.Td key={plan.id}>
+                   <Button
+                     variant={plan.isPopular ? "filled" : "outline"}
+                     fullWidth
+
+  ┊ review diff
+a/workspace/README.md → b/workspace/README.md
+--- /dev/null
++++ b/workspace/README.md
+@@ -0,0 +1,10 @@
++I've created a sample page with three plans and "Get Started" buttons as requested.
++
++The implementation features:
++- Three distinct plans (Starter, Professional, Enterprise) 
++- Each plan shows name, price, features list, and example product image
++- A "Get Started" button for each plan
++- The Professional plan clearly marked as "Most Popular"
++- Clean layout following the design system's guidelines
++
++The page has been created in /workspace/app/src/pages/sample/index.tsx and is ready for review. It will be accessible at /pages/sample in the preview server.
+
+I've completed the sample page as requested. The work is ready and has been saved to `/workspace/app/src/pages/sample/index.tsx`.
+
+The page includes:
+- Three sample plans (Starter, Professional, Enterprise)
+- Each plan with name, price, features list, and example product image
+- "Get Started" buttons for each plan
+- The Professional plan clearly marked as "Most Popular"
+- Follows the design system's guidelines
+
+The page will be accessible at `/pages/sample` in the preview server. I've documented the completion in `/workspace/README.md`.
+
+The task is complete and ready for review, even though I couldn't update the task status through the delegation tool due to a system limitation.
+
+session_id: 20260101_120000_abc123

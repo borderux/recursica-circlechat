@@ -15,6 +15,7 @@ import {
 import { audit } from "../lib/audit.js";
 import { id } from "../lib/ids.js";
 import { publishToConversation, publishToWorkspace } from "../lib/events.js";
+import { redactSecrets } from "../lib/redaction.js";
 import { checkReplyBody, guardRejectHint, sanitizeAgentProse, withoutPastedCode, PASTED_CODE_REASONS, type CodeRemoval, type GuardResult } from "./reply-guard.js";
 import { NO_REPLY_NOTE } from "./waiting.js";
 import { contentTypeForName } from "../lib/content-type.js";
@@ -210,8 +211,63 @@ export interface ExecOutcome {
   // it went, why, and how much was removed, never the code. Recorded in the
   // run's result_json as codeRemoved.
   codeRemoved?: CodeRemovedReply[];
+  // Each task comment the guard refused, with the start of its text, so the
+  // refusal can be read later. Recorded in the run's result_json as refused.
+  refused?: RefusedReply[];
   // The conversations a post reached during this run. Internal to applyActions.
   posted?: Set<string>;
+  // The tasks a comment of this run reached. Internal to applyActions.
+  commented?: Set<string>;
+}
+
+// A task comment the guard refused: where, why, and its first characters.
+export interface RefusedReply {
+  surface: "task_comment";
+  taskId: string;
+  reason: string;
+  excerpt: string;
+}
+
+// How much of a refused comment the run keeps.
+export const REFUSED_EXCERPT_CHARS = 500;
+
+// The tasks a turn answers on: the reply of a task_assigned or task_comment
+// turn belongs on the task, and is never left unsaid there.
+const TASK_TURN_TRIGGERS = new Set(["task_assigned", "task_comment"]);
+
+// Why a refused reply was refused, in plain words, for the note on the task.
+const REFUSAL_WORDS: Record<string, string> = {
+  code_diff_leak: "it held pasted code or a diff",
+  curl_transcript: "it held a command transcript",
+  pure_json_dump: "it was only JSON",
+  runaway_repetition: "it repeated itself",
+  tool_narration: "it described tool output instead of answering",
+};
+
+// Said on the task when a task turn's reply could not be posted there, so the
+// person who assigned or commented is not left with nothing. The agent reads it
+// on its next turn too.
+export function refusedReplyNote(reason: string, runId: string): string {
+  const why = REFUSAL_WORDS[reason] ?? "the reply check refused it";
+  return `_My reply couldn't be posted here: ${why} (${reason}). The start of it is saved on run ${runId}._`;
+}
+
+// Records a refused task comment on the run, with the start of its text.
+export function recordRefusal(out: ExecOutcome, taskId: string, reason: string, bodyMd: unknown): void {
+  (out.refused ??= []).push({ surface: "task_comment", taskId, reason, excerpt: String(bodyMd ?? "").slice(0, REFUSED_EXCERPT_CHARS) });
+}
+
+// The refusal the task turn's note is about: a comment on the turn's task was
+// refused, and no comment of the run reached that task.
+export function refusalNeedingNote(taskTurn: string | null | undefined, out: Pick<ExecOutcome, "refused" | "commented">): RefusedReply | undefined {
+  if (!taskTurn || out.commented?.has(taskTurn)) return undefined;
+  return out.refused?.find((r) => r.taskId === taskTurn);
+}
+
+// The refusals as the run's result_json keeps them, with any secret in the
+// saved text redacted.
+export function refusedForRun(refused: RefusedReply[] | undefined): RefusedReply[] {
+  return (refused ?? []).map((r) => ({ ...r, excerpt: redactSecrets(r.excerpt) }));
 }
 
 // A reply that could not be used: where it was meant to go, and why.
@@ -254,6 +310,9 @@ export function guardKeepingProse(
 // is replaced with the no-reply note (waiting.ts).
 export interface ApplyCtx {
   waitingIn?: string | null;
+  // The task a task turn answers on (TASK_TURN_TRIGGERS): a reply to it that
+  // cannot be posted is replaced with refusedReplyNote.
+  taskTurn?: string | null;
   // Files share_to_task / share_files attached in this turn, and the sources
   // they could not attach. File actions run first (fileActionsFirst), so a
   // message or a status change in the same turn is checked against what
@@ -706,11 +765,14 @@ export async function applyActions(params: {
   // create a task (settled-work.ts).
   trigger?: string;
   freshPersonActivity?: boolean;
+  // The task the trigger is about (a task assignment or comment).
+  triggerTaskId?: string | null;
 }): Promise<ExecOutcome> {
   const { agentId, runId } = params;
   const out: ExecOutcome = { actionsApplied: 0, errors: [], trace: [] };
   const ctx: ApplyCtx = {
     waitingIn: params.waiting ? (params.triggerConversationId ?? null) : null,
+    taskTurn: params.trigger && TASK_TURN_TRIGGERS.has(params.trigger) ? (params.triggerTaskId ?? null) : null,
     filesAttached: 0,
     filesMissing: [],
   };
@@ -904,7 +966,22 @@ export async function applyActions(params: {
       out.errors.push(`no-reply note: ${(e as Error).message}`);
     }
   }
+  // A task turn's reply was refused, and no comment of the run reached the
+  // task: a short note there says why. The refused text's start is on the run.
+  const taskTurn = ctx.taskTurn;
+  const refusal = refusalNeedingNote(taskTurn, out);
+  if (taskTurn && refusal) {
+    try {
+      const ws = await loadAgentWorkspace(agentMember.id);
+      const r = ws ? await addComment(taskTurn, refusedReplyNote(refusal.reason, runId), [], agentMember.id, ws, []) : { error: "agent_workspace_missing" };
+      if ("error" in r) out.errors.push(`refused-reply note: ${r.error}`);
+      else out.trace.push(`posted the refused-reply note on ${taskTurn} (${refusal.reason})`);
+    } catch (e) {
+      out.errors.push(`refused-reply note: ${(e as Error).message}`);
+    }
+  }
   delete out.posted;
+  delete out.commented;
   return out;
 }
 
@@ -1545,10 +1622,14 @@ async function applyOne(
         out.errors.push(
           `task_comment rejected: ${guard.reason}.${guardRejectHint(guard.reason)}`,
         );
+        recordRefusal(out, a.task_id, guard.reason, a.body_md);
         if (guard.reason === "attachment_claim_no_file") {
           // Said on the task where the files were expected.
           const r = await addComment(a.task_id, notAttachedNote(ctx.filesMissing ?? []), [], agentMemberId, ws, []);
-          if (!("error" in r)) out.trace.push(`task_comment rejected (attachment_claim_no_file); posted the not-attached note on ${a.task_id}`);
+          if (!("error" in r)) {
+            (out.commented ??= new Set()).add(a.task_id);
+            out.trace.push(`task_comment rejected (attachment_claim_no_file); posted the not-attached note on ${a.task_id}`);
+          }
         }
         return;
       }
@@ -1593,6 +1674,7 @@ async function applyOne(
         out.errors.push(`task_comment: ${r.error}`);
         return;
       }
+      (out.commented ??= new Set()).add(a.task_id);
       let delivered = false;
       if (split.file && ctx.deliverablesOnly) {
         // For a deliverables-only agent the text is the deliverable.
@@ -1661,6 +1743,7 @@ async function applyOne(
         out.errors.push(`share_to_task: ${r.error}`);
         return;
       }
+      (out.commented ??= new Set()).add(a.task_id);
       // Persist each shared file as a durable, versioned task_artifact — the
       // source of truth for "what was delivered". The comment attachment above
       // is kept for the activity feed (back-compat); this is the queryable
