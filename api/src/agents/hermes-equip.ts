@@ -220,7 +220,7 @@ export async function addExtraMcpServers(hermesHome: string, setting: string | u
 
 // Native read-only tools exposed to the model via MCP (writes stay on the
 // <actions> path so they keep flowing through the worker's run accounting).
-const MCP_READ_TOOLS = [
+export const MCP_READ_TOOLS = [
   "me",
   "list_conversations",
   "list_members",
