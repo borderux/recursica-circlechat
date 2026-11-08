@@ -665,6 +665,7 @@ async function processAgentJob(job: Job<AgentJobPayload>): Promise<void> {
           applied: outcome.actionsApplied,
           errors: redactLines(outcome.errors),
           ...(dropped.length ? { dropped } : {}),
+          ...(outcome.codeRemoved?.length ? { codeRemoved: outcome.codeRemoved } : {}),
           ...(cls.status === "ok" && !cls.productive ? { idle: true } : {}),
         },
         traceJson: redactLines([...trace, ...outcome.trace]),
