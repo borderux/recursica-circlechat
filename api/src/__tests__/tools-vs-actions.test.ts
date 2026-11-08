@@ -145,7 +145,9 @@ describe("the prompt", () => {
     const request = prompt.indexOf(`THIS TURN'S REQUEST (task "Fake transcript test", task_demo):`);
     expect(request).toBeGreaterThan(-1);
     expect(prompt).toContain("@pat on the task: @writer Make one fake 15-minute transcript");
-    expect(request).toBeLessThan(prompt.indexOf("Write 2 fake 30-minute product demo transcripts"));
+    // A task turn's conversation is the task's comments: the channel's older request is not in
+    // the prompt at all.
+    expect(prompt).not.toContain("Write 2 fake 30-minute product demo transcripts");
     // The agent's own comment is not the request.
     expect(bridge.taskRequestBlock(taskPacket("task_assigned"))).not.toContain("On it.");
     // Not a task turn: no request block.

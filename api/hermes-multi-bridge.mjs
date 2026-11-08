@@ -1416,6 +1416,88 @@ Hard rules now in force:
 const TOOLS_VS_ACTIONS =
   "TOOLS vs ACTIONS: tools (write_file, read_file, terminal, execute_code) are called through tool calling and run during your turn; their results come back to you. <actions> entries run after your reply, in CircleChat only (posts, tasks, shares). A file is written only by a tool, never by an <actions> entry.";
 
+// A turn started by a task (an assignment, or a comment on the task) holds its
+// conversation on that task's card. Its reply posts as a comment on the task,
+// never in chat or a direct message, so a person's reply on the card reaches
+// the agent's next turn as the same conversation. The task id, or null.
+function taskTurnId(packet) {
+  if (packet?.trigger !== "task_assigned" && packet?.trigger !== "task_comment") return null;
+  const id = packet?.task?.id;
+  return typeof id === "string" && id ? id : null;
+}
+
+// Where a turn's reply goes, as actions. The prose (postBody) goes to the chat
+// conversation `conv` when the turn has one; on a task turn it goes on the task
+// as a comment, with its attachments, and an action that would post into a
+// direct message during a task turn becomes a comment on the task too.
+// Returns { actions, notes }: notes are log lines.
+function routeTurnReply({ packet, conv, postBody, attachments = [], sideActions = [], replyTo, chatMax }) {
+  const actions = [];
+  const notes = [];
+  const taskId = taskTurnId(packet);
+  if (taskId) {
+    if (postBody) {
+      actions.push({ type: "task_comment", task_id: taskId, body_md: postBody, ...(attachments.length ? { attachments } : {}) });
+      notes.push(`${packet.trigger} → ${postBody.length}-char reply posted as a comment on ${taskId}`);
+    }
+    const dms = new Set((packet.inbox || []).filter((c) => c?.conversationKind === "dm").map((c) => c.conversationId));
+    for (const a of sideActions) {
+      if (a && a.type === "post_message" && dms.has(a.conversation_id)) {
+        actions.push({ type: "task_comment", task_id: taskId, body_md: a.body_md, ...(Array.isArray(a.attachments) && a.attachments.length ? { attachments: a.attachments } : {}) });
+        notes.push(`${packet.trigger} → a post into a direct message moved onto ${taskId} as a comment`);
+      } else actions.push(a);
+    }
+    return { actions, notes };
+  }
+  if (postBody && conv) {
+    let chatBody = postBody;
+    if (postBody.length > chatMax) {
+      // Too long for chat. If this turn is about a task (the trigger's task, or
+      // a task the agent targeted in its own actions), the long form goes onto
+      // THAT card as a task_comment and chat gets a short pointer. Otherwise it
+      // goes to chat whole. Either way the api keeps the text whole: past the
+      // surface's limit it becomes an attached reply.md
+      // (api/src/agents/long-reply.ts), never a cut.
+      const routeTaskId =
+        (packet.task && typeof packet.task.id === "string" && packet.task.id) ||
+        sideActions.find((sa) => sa && typeof sa.task_id === "string")?.task_id ||
+        null;
+      if (routeTaskId) {
+        actions.push({ type: "task_comment", task_id: routeTaskId, body_md: postBody });
+        chatBody = `${leadOf(postBody, CHAT_POINTER_MAX)}\n\n_Full update on the task card: ${routeTaskId}_`;
+        notes.push(`${packet.trigger} → ${postBody.length}-char prose routed to task_comment on ${routeTaskId}; chat gets a ${chatBody.length}-char pointer`);
+      } else {
+        notes.push(`${packet.trigger} → ${postBody.length}-char prose to chat whole; the api attaches it as a file`);
+      }
+    }
+    actions.push({
+      type: "post_message",
+      conversation_id: conv.conversationId,
+      body_md: chatBody,
+      ...(replyTo ? { reply_to: replyTo } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    });
+  } else if (postBody && !conv) {
+    // Task-only mode and the agent wrote prose but no actions block. Don't
+    // drop the work — auto-wrap as a task_comment on the agent's most-stale
+    // assigned task so the prose lands SOMEWHERE useful. If the agent already
+    // emitted any task-targeting side action, the prose probably belongs
+    // alongside it, so attach to that task.
+    const targetTaskId =
+      sideActions.find((sa) => sa && typeof sa.task_id === "string")?.task_id ||
+      (Array.isArray(packet.myTasks) && packet.myTasks[0]?.id) ||
+      null;
+    if (targetTaskId) {
+      notes.push(`task-only: auto-wrapping ${postBody.length}-char prose into task_comment on ${targetTaskId}`);
+      actions.push({ type: "task_comment", task_id: targetTaskId, body_md: postBody });
+    } else {
+      notes.push(`task-only: dropping ${postBody.length}-char prose (no conv and no task to wrap into)`);
+    }
+  }
+  for (const a of sideActions) actions.push(a);
+  return { actions, notes };
+}
+
 // On a task turn, the request is the task's: its newest comment from a person,
 // else its title and description. It leads the prompt, ahead of the channel's
 // history, so an older request in the channel is not taken for this turn's.
@@ -1477,10 +1559,15 @@ const STYLE_RULES = [
 function buildPrompt(entry, packet) {
   const agent = packet.agent || {};
   const primaryConv = packet.inbox && packet.inbox[0];
-  const taskOnly = !primaryConv;
-  const conv = primaryConv || {};
+  // A task turn's conversation is the task's comments (taskTurnId), whatever
+  // the inbox holds.
+  const taskTurn = taskTurnId(packet);
+  const taskOnly = !primaryConv && !taskTurn;
+  const conv = taskTurn ? {} : primaryConv || {};
   const kind = conv.conversationKind ?? "channel";
-  const convLabel = taskOnly
+  const convLabel = taskTurn
+    ? `the comments on the task "${packet.task.title}". Your reply is posted there as a comment, never in a channel or a direct message, and a person's reply on the task reaches you on your next turn`
+    : taskOnly
     ? "no active channel — this is a task-only heartbeat"
     : kind === "dm"
       ? "a direct message (1:1)"
@@ -1609,9 +1696,9 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
               : packet.trigger === "ambient"
                 ? `Ambient window — the channel's been quiet and the team wants to keep it feeling alive. You're allowed (not required) to post a short, in-character contribution: continue the last thread of thought, ask a specific colleague something in your role's lane (@-mention them), share what you're working on, or react to a recent message. ONE message only, 1–2 sentences, no fake enthusiasm. If you genuinely have nothing to add right now, respond with exactly "HEARTBEAT_OK" — don't post filler.`
                 : packet.trigger === "task_assigned"
-                  ? `You were assigned a task on the workspace board. Task details are below in the TASK block. Follow your persona, and start the work in this turn: when your persona asks questions before working, post those questions now, as plain text, a few at a time; otherwise do the first real step of the work now. Never only move the task's status: a status change alone is not a turn's work. If this isn't in your lane, add a comment saying so and unassign yourself. Don't post in the channel just to say "got it" — the activity log already shows the assignment.`
+                  ? `You were assigned a task on the workspace board. Task details are below in the TASK block. Follow your persona, and start the work in this turn: when your persona asks questions before working, write them now as your reply, in plain text: your reply is posted as a comment on this task; otherwise do the first real step of the work now. Never only move the task's status: a status change alone is not a turn's work. If this isn't in your lane, add a comment saying so and unassign yourself. Don't post in the channel just to say "got it" — the activity log already shows the assignment.`
                   : packet.trigger === "task_comment"
-                    ? `A new comment landed on a task you're involved with. Read the recent comments in the TASK block. Reply by adding a comment on the task (POST /agent-api/tasks/<id>/comments), not by posting in the channel. If the comment is a question for you, answer concretely. If it's an ack, a thanks, or a status note that asks nothing of you and changes nothing about your work, respond with "HEARTBEAT_OK" — do NOT echo it back, restate the situation, or add a "noted" comment. Silence is the correct move on the task thread more often than not.`
+                    ? `A new comment landed on a task you're involved with. Read the conversation on the task in the TASK block, oldest first: it continues from your last comment there. Your reply is posted as a comment on this task, never in a channel or a direct message. If the comment is a question for you, answer concretely. If it's an ack, a thanks, or a status note that asks nothing of you and changes nothing about your work, respond with "HEARTBEAT_OK" — do NOT echo it back, restate the situation, or add a "noted" comment. Silence is the correct move on the task thread more often than not.`
                     : packet.trigger === "approval_response"
                       ? formatApprovalResponse(packet.approvalResponse)
                       : packet.trigger === "continuation"
@@ -1741,8 +1828,11 @@ Don't repeat yourself across heartbeats: if your last task_comment said "I'll dr
       t.historySummary && String(t.historySummary).trim()
         ? `\nEarlier in this thread (summary of older comments):\n${String(t.historySummary).trim()}`
         : "";
+    // On a task turn the comments are the conversation, so each shows whole
+    // (up to 2000 characters): the agent's own question and the reply to it.
+    const commentMax = taskTurn ? 2000 : 200;
     const commentsLine = (t.recentComments || []).length
-      ? `\nRecent comments:\n${t.recentComments.map((c) => `  @${c.memberHandle}: ${String(c.bodyMd).slice(0, 200)}`).join("\n")}`
+      ? `\n${taskTurn ? "The conversation on this task, oldest first" : "Recent comments"}:\n${t.recentComments.map((c) => `  @${c.memberHandle}: ${String(c.bodyMd).slice(0, commentMax)}`).join("\n")}`
       : "";
     const sourceLine = t.conversationName ? `From channel: #${t.conversationName}` : null;
     // Pre-computed quality verdict (review entry). Gives a reviewing manager a
@@ -2185,8 +2275,11 @@ function connect(entry) {
     if (trigger === "scheduled" && inbox.length === 0 && !hasMyTasks) {
       return reply({ status: "HEARTBEAT_OK" });
     }
-    const conv = inbox[0]; // may be undefined in task-only mode
-    if (!conv && !hasMyTasks) return reply({ status: "HEARTBEAT_OK" });
+    // A task turn's conversation is on the task's card (taskTurnId): its reply
+    // never goes to a chat conversation, so it takes none.
+    const taskTurn = taskTurnId(p);
+    const conv = taskTurn ? undefined : inbox[0]; // may be undefined in task-only mode
+    if (!conv && !hasMyTasks && !taskTurn) return reply({ status: "HEARTBEAT_OK" });
 
     // The conv-bound guards (addressed-to-someone-else, self-last, DM) only
     // make sense when there IS a conv. In task-only mode we skip them and go
@@ -2378,69 +2471,13 @@ function connect(entry) {
       if (body && body.trim() && !postBody) {
         console.log(`[${entry.handle}] ${trigger} → body was tool-call/artifact-only; suppressing post (sideActions=${sideActions.length})`);
       }
-      // Only emit a post_message if there's something to say AND we have a
-      // conversation to post into. In task-only mode (scheduled wake with
-      // empty inbox + open tasks), conv is undefined — the agent's prose
-      // would have nowhere to land, so we drop it and let the side-actions
-      // (task_comment / share_to_task / update_task) carry the work.
       // Past this length a reply goes to its task when it has one. A
       // deliverables-only agent keeps only a summary in chat.
       const deliverablesOnly = p.agent?.deliverablesOnly === true;
       const chatMax = deliverablesOnly ? SUMMARY_MAX : CHAT_BODY_MAX;
-      if (postBody && conv) {
-        let chatBody = postBody;
-        if (postBody.length > chatMax) {
-          // Too long for chat. If this turn is about a task (the trigger's
-          // task, or a task the agent targeted in its own actions), the long
-          // form goes onto THAT card as a task_comment and chat gets a short
-          // pointer. Otherwise it goes to chat whole. Either way the api keeps
-          // the text whole: past the surface's limit it becomes an attached
-          // reply.md (api/src/agents/long-reply.ts), never a cut.
-          const routeTaskId =
-            (p.task && typeof p.task.id === "string" && p.task.id) ||
-            sideActions.find((sa) => sa && typeof sa.task_id === "string")?.task_id ||
-            null;
-          if (routeTaskId) {
-            actions.push({
-              type: "task_comment",
-              task_id: routeTaskId,
-              body_md: postBody,
-            });
-            chatBody = `${leadOf(postBody, CHAT_POINTER_MAX)}\n\n_Full update on the task card: ${routeTaskId}_`;
-            console.log(`[${entry.handle}] ${trigger} → ${postBody.length}-char prose routed to task_comment on ${routeTaskId}; chat gets a ${chatBody.length}-char pointer`);
-          } else {
-            console.log(`[${entry.handle}] ${trigger} → ${postBody.length}-char prose to chat whole; the api attaches it as a file`);
-          }
-        }
-        actions.push({
-          type: "post_message",
-          conversation_id: conv.conversationId,
-          body_md: chatBody,
-          ...(replyTo ? { reply_to: replyTo } : {}),
-          ...(attachments.length ? { attachments } : {}),
-        });
-      } else if (postBody && !conv) {
-        // Task-only mode and the agent wrote prose but no actions block.
-        // Don't drop the work — auto-wrap as a task_comment on the agent's
-        // most-stale assigned task so the prose lands SOMEWHERE useful. If
-        // the agent already emitted any task-targeting side action, the
-        // prose probably belongs alongside it, so attach to that task.
-        const targetTaskId =
-          sideActions.find((sa) => sa && typeof sa.task_id === "string")?.task_id ||
-          (Array.isArray(p.myTasks) && p.myTasks[0]?.id) ||
-          null;
-        if (targetTaskId) {
-          console.log(`[${entry.handle}] task-only: auto-wrapping ${postBody.length}-char prose into task_comment on ${targetTaskId}`);
-          actions.push({
-            type: "task_comment",
-            task_id: targetTaskId,
-            body_md: postBody,
-          });
-        } else {
-          console.log(`[${entry.handle}] task-only: dropping ${postBody.length}-char prose (no conv and no task to wrap into)`);
-        }
-      }
-      for (const a of sideActions) actions.push(a);
+      const routed = routeTurnReply({ packet: p, conv, postBody, attachments, sideActions, replyTo, chatMax });
+      for (const n of routed.notes) console.log(`[${entry.handle}] ${n}`);
+      actions.push(...routed.actions);
       console.log(
         `[${entry.handle}] replying, len=${postBody.length}, att=${attachments.length}${sideActions.length ? `, actions=${sideActions.length} (${sideActions.map((a) => a.type).join("+")})` : ""}`,
       );
@@ -2455,7 +2492,9 @@ function connect(entry) {
       console.error(`[${entry.handle}] error: ${e.message.split("\n")[0]}`);
       // Without a conversation we have nowhere to post the error, just trace it.
       reply({
-        actions: conv
+        actions: taskTurn
+          ? [{ type: "task_comment", task_id: taskTurn, body_md: `⚠️ ${entry.name} error: \`${e.message.split("\n")[0].slice(0, 300)}\`` }]
+          : conv
           ? [
               {
                 type: "post_message",
@@ -2511,6 +2550,8 @@ export {
   TOOLS_VS_ACTIONS,
   REQUEST_RULES,
   taskRequestBlock,
+  taskTurnId,
+  routeTurnReply,
   historyMessages,
   WAITING_REMINDER,
   TOOL_CALL_REMINDER,

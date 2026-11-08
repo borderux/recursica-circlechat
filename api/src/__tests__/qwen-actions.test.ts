@@ -127,7 +127,7 @@ describe("the instruction for a newly assigned task", () => {
   it("says to follow the persona and start the work in this turn, questions first when the persona asks them", () => {
     const prompt = bridge.buildPrompt({ handle: "designer", name: "Designer", hermesHome: "/opt/hermes-homes/.hermes-designer" }, packet);
     expect(prompt).toContain("Follow your persona, and start the work in this turn");
-    expect(prompt).toContain("when your persona asks questions before working, post those questions now, as plain text, a few at a time");
+    expect(prompt).toContain("when your persona asks questions before working, write them now as your reply, in plain text: your reply is posted as a comment on this task");
     expect(prompt).toContain("Never only move the task's status: a status change alone is not a turn's work.");
   });
 
