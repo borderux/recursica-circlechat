@@ -838,8 +838,31 @@ function stripClarifyNoise(text) {
     .trim();
 }
 
+// The diff Hermes prints after a file write: a "┊ review diff" header, the
+// "a/x → b/x" line, ---/+++ headers and hunks of context, removed and added
+// lines. Only its header lines were dropped before, so a turn that rewrote a
+// file eight times posted the removed lines of every rewrite as its reply. A
+// diff runs from its first header line to the next empty line or prose line.
+const FILE_DIFF_START_RE =
+  /^\s*(?:┊\s*)?(?:review diff\b|[ab]\/\S+\s*(?:→|->)\s*[ab]\/\S+|diff --git |--- (?:a\/|\/dev\/null)|\+\+\+ (?:b\/|\/dev\/null)|@@ .*@@)/i;
+const FILE_DIFF_BODY_RE = /^(?:\s*┊.*|[ +\-\\].*)$/;
+function dropFileWriteDiffs(text) {
+  const out = [];
+  let inDiff = false;
+  for (const line of String(text ?? "").split("\n")) {
+    if (FILE_DIFF_START_RE.test(line)) {
+      inDiff = true;
+      continue;
+    }
+    if (inDiff && line !== "" && FILE_DIFF_BODY_RE.test(line)) continue;
+    inDiff = false;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 function extractReply(raw) {
-  const stripAnsi = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  const stripAnsi = dropFileWriteDiffs(raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, ""));
   if (looksLikeTraceback(stripAnsi)) return "";
   if (looksLikeGatewayError(stripAnsi)) return "";
   if (looksLikeEmptyReplyNotice(stripAnsi)) return "";
@@ -875,6 +898,73 @@ function extractReply(raw) {
       .trim())),
     RAW_REPLY_MAX,
   );
+}
+
+// ───────── the agent's final message ─────────
+// The reply is the agent's final message, read from its Hermes session in
+// state.db, not what the console printed: the console also carries what Hermes
+// shows while the agent works, such as the diff of every file write, and the
+// code check refused a whole reply for those lines. The session is the one the
+// console names on its session_id line, or else the newest `tool` session
+// started since the turn began (one turn at a time per home, claimAgentSlot).
+// A session whose last assistant message is a tool call has no final message.
+// Anything unreadable gives null, and the console extraction stands.
+let sqliteModule;
+async function loadSqlite() {
+  if (sqliteModule === undefined) {
+    try {
+      sqliteModule = await import("node:sqlite");
+    } catch {
+      sqliteModule = null;
+    }
+  }
+  return sqliteModule;
+}
+
+function sessionIdFrom(text) {
+  const m = /^\s*session_id\s*:\s*(\S+)/im.exec(String(text ?? ""));
+  return m ? m[1] : null;
+}
+
+async function finalMessageFromSession(hermesHome, { sessionId, sinceSec } = {}) {
+  if (!hermesHome) return null;
+  const sqlite = await loadSqlite();
+  if (!sqlite) return null;
+  let db;
+  try {
+    db = new sqlite.DatabaseSync(joinPath(hermesHome, "state.db"), { readOnly: true });
+    const named = sessionId ? db.prepare("SELECT id FROM sessions WHERE id = ?").get(sessionId) : undefined;
+    const session =
+      named ??
+      (Number.isFinite(sinceSec)
+        ? db.prepare("SELECT id FROM sessions WHERE source = 'tool' AND started_at >= ? ORDER BY started_at DESC LIMIT 1").get(sinceSec)
+        : undefined);
+    if (!session) return null;
+    const last = db
+      .prepare("SELECT content, tool_calls FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 ORDER BY id DESC LIMIT 1")
+      .get(session.id);
+    if (!last) return null;
+    if (last.tool_calls && String(last.tool_calls).trim() !== "[]") return null;
+    return String(last.content ?? "").trim() || null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {}
+  }
+}
+
+// A Hermes turn's reply: the final message from the session when the console
+// shows Hermes finished with one, else the console's text. A console that held
+// only a crash, a gateway error or nothing stays empty, as before. The
+// runaway banner is only ever on the console.
+async function hermesTurnReply({ stdout = "", stderr = "", hermesHome, startedSec }) {
+  const consoleText = extractReply(stdout) || extractReply(stderr) || "";
+  const final = consoleText.trim()
+    ? await finalMessageFromSession(hermesHome, { sessionId: sessionIdFrom(stdout) ?? sessionIdFrom(stderr), sinceSec: startedSec })
+    : null;
+  return { text: final ?? consoleText, fromSession: Boolean(final), runaway: /Reached maximum iterations/i.test(consoleText) };
 }
 
 // Pulls every @handle token out of a markdown body. Skips `@` inside code
@@ -2351,6 +2441,9 @@ function connect(entry) {
       // One turn: the reply text, without Hermes's own runtime text
       // (stripHermesRuntimeText), and the container's exit as a run error.
       const runOnce = async (promptText) => {
+        // A few seconds early, so a session the container's clock dates just
+        // before ours still counts as this turn's.
+        const startedSec = Date.now() / 1000 - 5;
         const { stdout, stderr, exitCode, signal } = isOpenClaw
           ? await callOpenClaw(promptText, entry.openclawHome, entry.token, entry.handle)
           : await callHermes(promptText, entry.hermesHome, entry.token, modelOverride, entry.handle);
@@ -2365,14 +2458,18 @@ function connect(entry) {
         if (exitError) {
           console.error(`[${entry.handle}] ${trigger} → ${exitError} (reply kept, run marked failed)`);
         }
+        const hermes = isOpenClaw ? null : await hermesTurnReply({ stdout, stderr, hermesHome: entry.hermesHome, startedSec });
         const raw = isOpenClaw
           ? (extractOpenClawReply(stdout) || extractOpenClawReply(stderr) || "")
-          : (extractReply(stdout) || extractReply(stderr) || "");
+          : hermes.text;
+        if (hermes && hermes.text.trim() && !hermes.fromSession) {
+          console.warn(`[${entry.handle}] ${trigger} → no final message in the Hermes session; the reply is the console's text`);
+        }
         const runtime = isOpenClaw ? { text: raw, found: [] } : stripHermesRuntimeText(raw);
         if (runtime.found.length) {
           console.warn(`[${entry.handle}] ${trigger} → Hermes's own text kept out of the conversation (${runtime.found.join(", ")})`);
         }
-        return { exitError, rawText: runtime.text, runtimeFound: runtime.found };
+        return { exitError, rawText: runtime.text, runtimeFound: runtime.found, runaway: Boolean(hermes?.runaway) };
       };
       // A person waits on a DM or a human @-mention: a HEARTBEAT_OK reruns the
       // turn once with a reminder (turnForWaitingPerson).
@@ -2419,7 +2516,7 @@ function connect(entry) {
       // Hermes hit its agent-loop cap: the reply is a forced summary, not real
       // work. Post whatever substantive remainder survives the noise strip,
       // but tell the worker so the run is recorded as non-productive.
-      const runaway = /Reached maximum iterations/i.test(rawText);
+      const runaway = Boolean(turn.runaway) || /Reached maximum iterations/i.test(rawText);
       const outcomeErr = runaway
         ? { error: "runaway_max_iterations" }
         : exitError
@@ -2538,6 +2635,10 @@ function connect(entry) {
 // unless it's run as the entrypoint (or CC_BRIDGE_IMPORT_ONLY forces import-only).
 export {
   buildHermesSpawn,
+  dropFileWriteDiffs,
+  sessionIdFrom,
+  finalMessageFromSession,
+  hermesTurnReply,
   hermesChatArgs,
   stripHermesRuntimeText,
   personWaits,
