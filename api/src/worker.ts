@@ -20,7 +20,7 @@ import { buildContext } from "./agents/context.js";
 import { runTaskContext } from "./lib/cloud-models.js";
 import { runTaskId } from "./lib/cloud-models-rules.js";
 import { callAgent } from "./agents/adapters/dispatch.js";
-import { applyActions, type AgentAction, type DroppedReply } from "./agents/executor.js";
+import { applyActions, refusedForRun, type AgentAction, type DroppedReply } from "./agents/executor.js";
 import { personWaits } from "./agents/waiting.js";
 import {
   materialiseScheduledRun,
@@ -565,6 +565,7 @@ async function processAgentJob(job: Job<AgentJobPayload>): Promise<void> {
       triggerConversationId: payload.conversationId ?? null,
       waiting: personWaits(payload.trigger, packet),
       trigger: payload.trigger,
+      triggerTaskId: payload.taskId ?? null,
       freshPersonActivity: isHeartbeatTrigger(payload.trigger)
         ? isPersonWake(await wakeReasonForAgent(agent.id, sinceTs))
         : true,
@@ -578,6 +579,7 @@ async function processAgentJob(job: Job<AgentJobPayload>): Promise<void> {
     // Each reply that could not be used, from the bridge (a turn with nothing
     // usable) and from the executor (a post the guard refused): where it was
     // meant to go and why, never the text. A host reads these from result_json.
+    // A refused task comment keeps the start of its text, as refused.
     const dropped: DroppedReply[] = [
       ...(response !== "HEARTBEAT_OK" && Array.isArray(response.dropped) ? response.dropped : []),
       ...(outcome.dropped ?? []),
@@ -666,6 +668,7 @@ async function processAgentJob(job: Job<AgentJobPayload>): Promise<void> {
           errors: redactLines(outcome.errors),
           ...(dropped.length ? { dropped } : {}),
           ...(outcome.codeRemoved?.length ? { codeRemoved: outcome.codeRemoved } : {}),
+          ...(outcome.refused?.length ? { refused: refusedForRun(outcome.refused) } : {}),
           ...(cls.status === "ok" && !cls.productive ? { idle: true } : {}),
         },
         traceJson: redactLines([...trace, ...outcome.trace]),

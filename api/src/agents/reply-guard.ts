@@ -259,6 +259,15 @@ function looksLikeGarbledOutput(s: string): boolean {
 // never appear in an organic chat message.
 const API_SCRIPT_RE =
   /\bos\.environ(?:\.get)?\s*[([]\s*["']CC_(?:API_BASE|BOT_TOKEN)["']|\burllib\.request\b|^\s*import\s+urllib\b/im;
+// The lines the code check counts. withoutPastedCode removes exactly these, so a
+// reply refused for them keeps its prose: a code line under a + or - sign at any
+// indent and in any case (a JSX "-        <Text ta=\"center\">" included), a
+// markdown line under a sign, and a sign glued to its content or alone.
+const CODE_DIFF_LINE_RE =
+  /^\s*[+-]\s*(?:import |from |def |class |with |try:|except|return |print\(|const |let |var |function |document\.|window\.|\/\/|\/\*|<!--|req\b|resp\b|headers\b|url\b|token\b|api_base\b|<\/?[a-z]|[A-Za-z_][\w.]*\s*=\s*\S)/i;
+const MD_DIFF_LINE_RE = /^[+-]\s*(?:#{1,6}\s|\*\*\S|[-*]\s+\S|>\s)/;
+const PLAIN_DIFF_LINE_RE = /^[+-](?:\S|\s*$)/;
+
 // Code/diff dump: 3+ `+`-prefixed source OR markdown lines (a pasted diff).
 // The code patterns catch script diffs (import/def/assignment/call); the
 // markdown patterns catch the mutated form seen after the script leaks were
@@ -269,13 +278,9 @@ function looksLikeCodeDiffDump(s: string): boolean {
   // Both diff polarities: agents paste removed-line (`-`) hunks too, which the
   // older `+`-only detector missed (observed: Phil dumping "-// Demo Widget…",
   // "-document.addEventListener(…" lines). `[+-]` covers add AND remove.
-  const codeDiff = (
-    s.match(
-      /^\s*[+-]\s*(?:import |from |def |class |with |try:|except|return |print\(|const |let |var |function |document\.|window\.|\/\/|\/\*|<!--|req\b|resp\b|headers\b|url\b|token\b|api_base\b|<\/?[a-z]|[A-Za-z_][\w.]*\s*=\s*\S)/gim,
-    ) || []
-  ).length;
-  const mdDiff = (s.match(/^[+-]\s*(?:#{1,6}\s|\*\*\S|[-*]\s+\S|>\s)/gm) || [])
-    .length;
+  const lines = s.split(/\r?\n/);
+  const codeDiff = lines.filter((l) => CODE_DIFF_LINE_RE.test(l)).length;
+  const mdDiff = lines.filter((l) => MD_DIFF_LINE_RE.test(l)).length;
   if (codeDiff >= 3 || mdDiff >= 3) return true;
   // Plain-prose diff: a pasted hunk whose lines are neither code nor markdown
   // shaped ("+Neu Site Verification", "+Timestamp: $(date -u)", bare "+" spacer
@@ -283,9 +288,8 @@ function looksLikeCodeDiffDump(s: string): boolean {
   // polarity sign glued to content (or standing alone); require them to be
   // both numerous AND the bulk of the message so "+1" acks, phone numbers, and
   // "---" separators sprinkled through normal prose never trip it.
-  const lines = s.split(/\r?\n/);
   const nonEmpty = lines.filter((l) => l.trim().length > 0);
-  const plainDiff = nonEmpty.filter((l) => /^[+-](?:\S|\s*$)/.test(l)).length;
+  const plainDiff = nonEmpty.filter((l) => PLAIN_DIFF_LINE_RE.test(l)).length;
   return plainDiff >= 4 && plainDiff >= Math.ceil(nonEmpty.length * 0.6);
 }
 
@@ -311,7 +315,7 @@ function isDiffOnlyBody(s: string): boolean {
   if (/^[+-]\d+$/.test(t)) return false;
   const nonEmpty = t.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (!nonEmpty.length) return false;
-  return nonEmpty.every((l) => /^[+-](?:\S|\s*$)/.test(l));
+  return nonEmpty.every((l) => PLAIN_DIFF_LINE_RE.test(l));
 }
 
 // Agent messages that carry no information: "test comment", "source attached",
@@ -1011,11 +1015,11 @@ export interface CodeRemoval {
 }
 
 const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})/;
-// A diff line: its sign glued to the content, or standing alone ("+x", "-x", "+").
-const GLUED_DIFF_LINE_RE = /^[+-](?:\S|\s*$)/;
-// "+ anything" is a diff line; "- " is a list item unless code follows.
+// "+ anything" is a diff line; "- " is a list item unless code follows. A
+// "-" followed by the code's own indent (two spaces or more, or a tab) is a
+// removed line of indented code ("-    Table,"), never a list item.
 const SPACED_DIFF_LINE_RE =
-  /^\s*(?:\+\s|-\s+(?:import |const |let |var |function |def |class |return |<\/?[a-z][\w-]*[\s>/]|\/\/|\/\*|<!--))/;
+  /^\s*(?:\+\s|-\s+(?:import |const |let |var |function |def |class |return |<\/?[a-z][\w-]*[\s>/]|\/\/|\/\*|<!--))|^-(?: {2,}|\t)/i;
 const DIFF_HEADER_RE =
   /^\s*(?:@@ .* @@|diff --git |index [0-9a-f]+\.\.[0-9a-f]+|--- (?:a\/|\/dev\/null)|\+\+\+ (?:b\/|\/dev\/null)|\*\*\* (?:Begin Patch|End Patch|Update File:|Add File:|Delete File:))/;
 const PREVIEW_URL_RE = /https?:\/\/[^\s<>()`"'\]]*preview[^\s<>()`"'\]]*/gi;
@@ -1053,7 +1057,8 @@ export function withoutPastedCode(
       fence = open[1]; blocks++; removedLines++; removedChars += line.length + 1;
       continue;
     }
-    if (GLUED_DIFF_LINE_RE.test(line) || SPACED_DIFF_LINE_RE.test(line) || DIFF_HEADER_RE.test(line)) {
+    // Every line the code check counts, and a list item that is code ("- const x").
+    if (CODE_DIFF_LINE_RE.test(line) || MD_DIFF_LINE_RE.test(line) || PLAIN_DIFF_LINE_RE.test(line) || SPACED_DIFF_LINE_RE.test(line) || DIFF_HEADER_RE.test(line)) {
       removedLines++; removedChars += line.length + 1;
       continue;
     }
