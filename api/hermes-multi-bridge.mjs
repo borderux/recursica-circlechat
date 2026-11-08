@@ -10,8 +10,22 @@
 import WebSocket from "ws";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync, watchFile } from "node:fs";
-import { join as joinPath } from "node:path";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  rmSync,
+  watchFile,
+  writeSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath, resolve as resolvePath } from "node:path";
 
 const CFG_PATH = process.env.CC_BRIDGE_CONFIG ?? "./bridge-config.json";
 const WSS = process.env.CC_WSS_URL ?? "ws://localhost:3300/agent-socket";
@@ -908,7 +922,19 @@ function extractReply(raw) {
 // console names on its session_id line, or else the newest `tool` session
 // started since the turn began (one turn at a time per home, claimAgentSlot).
 // A session whose last assistant message is a tool call has no final message.
-// Anything unreadable gives null, and the console extraction stands.
+//
+// The bridge runs as root with every agent's home mounted, and state.db is a
+// file the agent can replace: with a link to another agent's state.db, or to a
+// file outside the homes. So state.db is never opened by its path. The home's
+// path must hold no link (its real path is itself), state.db and its write-ahead
+// log are opened without following a link (O_NOFOLLOW), and each must be a
+// regular file with one name (no hard link to another home's file), on the
+// home's own file system, and under STATE_DB_MAX_BYTES. What was opened is
+// copied into a private folder of the bridge's, and SQLite opens the copy,
+// read-only. Any check that fails, and anything unreadable, gives no final
+// message and a reason; the console's text stands, and the run records why.
+const STATE_DB_MAX_BYTES = 256 * 1024 * 1024;
+
 let sqliteModule;
 async function loadSqlite() {
   if (sqliteModule === undefined) {
@@ -926,45 +952,106 @@ function sessionIdFrom(text) {
   return m ? m[1] : null;
 }
 
-async function finalMessageFromSession(hermesHome, { sessionId, sinceSec } = {}) {
-  if (!hermesHome) return null;
-  const sqlite = await loadSqlite();
-  if (!sqlite) return null;
-  let db;
+class StateDbRefused extends Error {}
+
+// Copies <home>/<name> to <dir>/<name> through a descriptor opened without
+// following a link, after checking what the descriptor is. Returns false when
+// an optional file is missing.
+function copyHomeFile(home, homeDev, name, dir, { optional = false } = {}) {
+  let fd;
   try {
-    db = new sqlite.DatabaseSync(joinPath(hermesHome, "state.db"), { readOnly: true });
+    fd = openSync(joinPath(home, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e.code === "ENOENT" && optional) return false;
+    if (e.code === "ELOOP" || e.code === "EMLINK") throw new StateDbRefused(`${name} is a link`);
+    throw new StateDbRefused(`${name} could not be opened (${e.code ?? e.message})`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new StateDbRefused(`${name} is not a regular file`);
+    if (st.nlink !== 1) throw new StateDbRefused(`${name} has ${st.nlink} names (a hard link)`);
+    if (st.dev !== homeDev) throw new StateDbRefused(`${name} is on another file system than the home`);
+    if (st.size > STATE_DB_MAX_BYTES) throw new StateDbRefused(`${name} is over ${STATE_DB_MAX_BYTES} bytes`);
+    const out = openSync(joinPath(dir, name), "wx", 0o600);
+    try {
+      const buf = Buffer.allocUnsafe(1024 * 1024);
+      let total = 0;
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.length, null);
+        if (n === 0) break;
+        total += n;
+        if (total > STATE_DB_MAX_BYTES) throw new StateDbRefused(`${name} grew past ${STATE_DB_MAX_BYTES} bytes`);
+        writeSync(out, buf, 0, n);
+      }
+    } finally {
+      closeSync(out);
+    }
+    return true;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// The final message of the turn's session: { text } or { text: null, reason }.
+async function finalMessageFromSession(hermesHome, { sessionId, sinceSec } = {}) {
+  if (!hermesHome) return { text: null, reason: "no home" };
+  const sqlite = await loadSqlite();
+  if (!sqlite) return { text: null, reason: "node:sqlite unavailable" };
+  const home = resolvePath(hermesHome);
+  let dir, db;
+  try {
+    let homeStat;
+    try {
+      homeStat = lstatSync(home);
+    } catch (e) {
+      throw new StateDbRefused(`the home could not be read (${e.code ?? e.message})`);
+    }
+    if (homeStat.isSymbolicLink() || realpathSync(home) !== home) throw new StateDbRefused("the home's path holds a link");
+    if (!homeStat.isDirectory()) throw new StateDbRefused("the home is not a folder");
+    dir = mkdtempSync(joinPath(tmpdir(), "cc-state-"));
+    copyHomeFile(home, homeStat.dev, "state.db", dir);
+    copyHomeFile(home, homeStat.dev, "state.db-wal", dir, { optional: true });
+    db = new sqlite.DatabaseSync(joinPath(dir, "state.db"), { readOnly: true });
     const named = sessionId ? db.prepare("SELECT id FROM sessions WHERE id = ?").get(sessionId) : undefined;
     const session =
       named ??
       (Number.isFinite(sinceSec)
         ? db.prepare("SELECT id FROM sessions WHERE source = 'tool' AND started_at >= ? ORDER BY started_at DESC LIMIT 1").get(sinceSec)
         : undefined);
-    if (!session) return null;
+    if (!session) return { text: null, reason: "no session for this turn" };
     const last = db
       .prepare("SELECT content, tool_calls FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 ORDER BY id DESC LIMIT 1")
       .get(session.id);
-    if (!last) return null;
-    if (last.tool_calls && String(last.tool_calls).trim() !== "[]") return null;
-    return String(last.content ?? "").trim() || null;
-  } catch {
-    return null;
+    if (!last) return { text: null, reason: "no assistant message in the session" };
+    if (last.tool_calls && String(last.tool_calls).trim() !== "[]") return { text: null, reason: "the session ended on a tool call" };
+    const text = String(last.content ?? "").trim();
+    return text ? { text } : { text: null, reason: "the final message is empty" };
+  } catch (e) {
+    return { text: null, reason: e instanceof StateDbRefused ? e.message : `state.db could not be read (${e.message})` };
   } finally {
     try {
       db?.close();
     } catch {}
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
 // A Hermes turn's reply: the final message from the session when the console
-// shows Hermes finished with one, else the console's text. A console that held
-// only a crash, a gateway error or nothing stays empty, as before. The
+// shows Hermes finished with one, else the console's text, with the reason the
+// session gave none (sessionSkip). A console that held only a crash, a gateway
+// error or nothing stays empty, as before, and the session is not read. The
 // runaway banner is only ever on the console.
 async function hermesTurnReply({ stdout = "", stderr = "", hermesHome, startedSec }) {
   const consoleText = extractReply(stdout) || extractReply(stderr) || "";
   const final = consoleText.trim()
     ? await finalMessageFromSession(hermesHome, { sessionId: sessionIdFrom(stdout) ?? sessionIdFrom(stderr), sinceSec: startedSec })
     : null;
-  return { text: final ?? consoleText, fromSession: Boolean(final), runaway: /Reached maximum iterations/i.test(consoleText) };
+  return {
+    text: final?.text ?? consoleText,
+    fromSession: Boolean(final?.text),
+    runaway: /Reached maximum iterations/i.test(consoleText),
+    ...(final && !final.text ? { sessionSkip: final.reason } : {}),
+  };
 }
 
 // Pulls every @handle token out of a markdown body. Skips `@` inside code
@@ -2462,14 +2549,14 @@ function connect(entry) {
         const raw = isOpenClaw
           ? (extractOpenClawReply(stdout) || extractOpenClawReply(stderr) || "")
           : hermes.text;
-        if (hermes && hermes.text.trim() && !hermes.fromSession) {
-          console.warn(`[${entry.handle}] ${trigger} → no final message in the Hermes session; the reply is the console's text`);
-        }
+        // Why the session gave no final message, for the log and the run's trace.
+        const sessionSkip = hermes?.sessionSkip ? `no final message from the Hermes session (${hermes.sessionSkip}); the reply is the console's text` : undefined;
+        if (sessionSkip) console.warn(`[${entry.handle}] ${trigger} → ${sessionSkip}`);
         const runtime = isOpenClaw ? { text: raw, found: [] } : stripHermesRuntimeText(raw);
         if (runtime.found.length) {
           console.warn(`[${entry.handle}] ${trigger} → Hermes's own text kept out of the conversation (${runtime.found.join(", ")})`);
         }
-        return { exitError, rawText: runtime.text, runtimeFound: runtime.found, runaway: Boolean(hermes?.runaway) };
+        return { exitError, rawText: runtime.text, runtimeFound: runtime.found, runaway: Boolean(hermes?.runaway), sessionSkip };
       };
       // A person waits on a DM or a human @-mention: a HEARTBEAT_OK reruns the
       // turn once with a reminder (turnForWaitingPerson).
@@ -2583,7 +2670,7 @@ function connect(entry) {
         actions,
         ...outcomeErr,
         ...errorsField,
-        trace: [`${entry.handle} responded, len=${postBody.length}${attachments.length ? `, att=${attachments.length}` : ""}${sideActions.length ? `, actions=${sideActions.length}` : ""}${runaway ? ", runaway" : ""}`],
+        trace: [...(turn.sessionSkip ? [turn.sessionSkip] : []), `${entry.handle} responded, len=${postBody.length}${attachments.length ? `, att=${attachments.length}` : ""}${sideActions.length ? `, actions=${sideActions.length}` : ""}${runaway ? ", runaway" : ""}`],
       });
     } catch (e) {
       console.error(`[${entry.handle}] error: ${e.message.split("\n")[0]}`);

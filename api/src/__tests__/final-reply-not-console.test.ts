@@ -33,6 +33,7 @@ type Bridge = {
     text: string;
     fromSession: boolean;
     runaway: boolean;
+    sessionSkip?: string;
   }>;
 };
 let bridge: Bridge;
@@ -63,10 +64,11 @@ const answered = (text: string) => {
   expect(checkReplyBody(text)).toMatchObject({ ok: true });
 };
 
-// A Hermes home with the session tables the bridge reads.
-let home: string;
-function writeSessions(rows: Array<{ id: string; source: string; startedAt: number; messages: Array<{ role: string; content: string | null; toolCalls?: string }> }>) {
-  const db = new DatabaseSync(join(home, "state.db"));
+// A Hermes home with the session tables the bridge reads. Homes sit side by side, as the agents'
+// homes do, under a folder whose path holds no link (the temporary folder's own path may).
+let homes: string, home: string;
+function writeSessions(rows: Array<{ id: string; source: string; startedAt: number; messages: Array<{ role: string; content: string | null; toolCalls?: string }> }>, into = home) {
+  const db = new DatabaseSync(join(into, "state.db"));
   db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL);
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
       tool_calls TEXT, timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1);`);
@@ -90,10 +92,12 @@ const turnMessages = (last: { content: string | null; toolCalls?: string }) => [
 ];
 
 beforeEach(async () => {
-  home = await fs.mkdtemp(join(tmpdir(), "hermes-home-"));
+  homes = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "hermes-homes-")));
+  home = join(homes, ".hermes-designer");
+  await fs.mkdir(home);
 });
 afterEach(async () => {
-  await fs.rm(home, { recursive: true, force: true });
+  await fs.rm(homes, { recursive: true, force: true });
 });
 
 describe("the turn's console", () => {
@@ -136,10 +140,96 @@ describe("the reply is the agent's final message", () => {
     answered(noHome.text);
   });
 
+  it("is read with its write-ahead log, as Hermes leaves it before a checkpoint", async () => {
+    const db = new DatabaseSync(join(home, "state.db"));
+    db.exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
+        tool_calls TEXT, timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1);`);
+    db.prepare("INSERT INTO sessions VALUES (?, 'tool', ?)").run(SESSION_ID, TURN_STARTED + 6);
+    db.prepare("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)").run(SESSION_ID, FINAL, TURN_STARTED + 7);
+    expect(await fs.stat(join(home, "state.db-wal")).then((s) => s.size > 0)).toBe(true);
+    const r = await bridge.hermesTurnReply({ stdout: CONSOLE, hermesHome: home, startedSec: TURN_STARTED });
+    db.close();
+    expect(r).toEqual({ text: FINAL, fromSession: true, runaway: false });
+  });
+
   it("stays empty when the console held only a crash, without reading the session", async () => {
     writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: FINAL }) }]);
     const crash = "Traceback (most recent call last):\n  File \"cli.py\", line 1\nKeyboardInterrupt\n";
     expect(await bridge.hermesTurnReply({ stdout: crash, hermesHome: home, startedSec: TURN_STARTED })).toEqual({ text: "", fromSession: false, runaway: false });
+  });
+});
+
+// The bridge runs as root with every agent's home mounted, and an agent can replace its own
+// state.db. The bridge never follows a link on the way to it, reads only a regular file with one
+// name inside that agent's own home, opens a private copy read-only, and otherwise falls back to
+// the console, with the reason on the run.
+describe("an agent's state.db that is not its own regular file", () => {
+  const OTHER_FINAL = "Another agent's private answer, which must never be posted here.";
+  const fallsBack = async (reason: RegExp) => {
+    const r = await bridge.hermesTurnReply({ stdout: CONSOLE, hermesHome: home, startedSec: TURN_STARTED });
+    expect(r.fromSession).toBe(false);
+    expect(r.text).not.toContain(OTHER_FINAL);
+    answered(r.text);
+    expect(r.sessionSkip).toMatch(reason);
+    return r;
+  };
+  const otherHome = async () => {
+    const other = join(homes, ".hermes-reviewer");
+    await fs.mkdir(other);
+    writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: OTHER_FINAL }) }], other);
+    return other;
+  };
+
+  it("is refused when it is a link to another agent's state.db", async () => {
+    const other = await otherHome();
+    await fs.symlink(join(other, "state.db"), join(home, "state.db"));
+    await fallsBack(/^state\.db is a link$/);
+  });
+
+  it("is refused when it is a link to a file outside the homes", async () => {
+    const outside = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "outside-")));
+    try {
+      writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: OTHER_FINAL }) }], outside);
+      await fs.symlink(join(outside, "state.db"), join(home, "state.db"));
+      await fallsBack(/^state\.db is a link$/);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("is refused when a folder stands in its place", async () => {
+    await fs.mkdir(join(home, "state.db"));
+    await fallsBack(/^state\.db is not a regular file$/);
+  });
+
+  it("is refused when it is a hard link to another agent's state.db", async () => {
+    const other = await otherHome();
+    await fs.link(join(other, "state.db"), join(home, "state.db"));
+    await fallsBack(/^state\.db has 2 names \(a hard link\)$/);
+  });
+
+  it("is refused when its write-ahead log is a link, or the home's own path holds a link", async () => {
+    writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: FINAL }) }]);
+    const other = await otherHome();
+    await fs.writeFile(join(other, "state.db-wal"), "");
+    await fs.symlink(join(other, "state.db-wal"), join(home, "state.db-wal"));
+    await fallsBack(/^state\.db-wal is a link$/);
+    await fs.rm(join(home, "state.db-wal"));
+    const linkedHome = join(homes, ".hermes-linked");
+    await fs.symlink(home, linkedHome);
+    const r = await bridge.hermesTurnReply({ stdout: CONSOLE, hermesHome: linkedHome, startedSec: TURN_STARTED });
+    expect(r).toMatchObject({ fromSession: false, sessionSkip: "the home's path holds a link" });
+  });
+
+  it("leaves no copy behind, and never writes the agent's home", async () => {
+    writeSessions([{ id: SESSION_ID, source: "tool", startedAt: TURN_STARTED + 6, messages: turnMessages({ content: FINAL }) }]);
+    const before = (await fs.readdir(home)).sort();
+    const copiesBefore = (await fs.readdir(tmpdir())).filter((n) => n.startsWith("cc-state-")).length;
+    expect((await bridge.hermesTurnReply({ stdout: CONSOLE, hermesHome: home, startedSec: TURN_STARTED })).fromSession).toBe(true);
+    expect((await fs.readdir(home)).sort()).toEqual(before);
+    expect((await fs.readdir(tmpdir())).filter((n) => n.startsWith("cc-state-")).length).toBe(copiesBefore);
   });
 });
 
