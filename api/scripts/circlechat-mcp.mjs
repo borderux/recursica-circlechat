@@ -72,6 +72,28 @@ async function apiUploadFile(filePath) {
   return r.json();
 }
 
+// share_to_task takes only files in the shared workspace. CircleChat's executor reads each one
+// itself (lib/workspace-read.ts): a regular file, never through a link, at most 20 MB. The same
+// path rules are checked here first, so a path elsewhere in this container, such as the agent's
+// home at /opt/data, never reaches the api. There is no url form: a web address is share_files.
+const SHARE_ROOT = "/workspace";
+const SHARE_MAX_FILES = 10;
+function sharePathProblems(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return ["paths must be a non-empty list"];
+  if (paths.length > SHARE_MAX_FILES) return [`at most ${SHARE_MAX_FILES} files at once`];
+  const problems = [];
+  for (const p of paths) {
+    if (typeof p !== "string" || p.includes("\0") || !p.startsWith(`${SHARE_ROOT}/`)) {
+      problems.push(`${String(p)} is not inside ${SHARE_ROOT}`);
+      continue;
+    }
+    if (p.slice(SHARE_ROOT.length + 1).split("/").some((part) => part === "" || part === "." || part === "..")) {
+      problems.push(`${p} has an empty, "." or ".." part`);
+    }
+  }
+  return problems;
+}
+
 // ──────────────────────── tool catalog ────────────────────────
 
 const TOOLS = [
@@ -391,6 +413,36 @@ const TOOLS = [
     },
     run: ({ taskId, bodyMd, mentions }) =>
       apiAct({ type: "task_comment", task_id: taskId, body_md: bodyMd, mentions: mentions ?? [] }),
+  },
+  {
+    name: "share_to_task",
+    description:
+      "Attach files you wrote under /workspace to a task, as a comment with an optional note (same action as the `share_to_task` <actions> type). Each path must be an absolute path under /workspace/. CircleChat reads each file from the shared workspace and attaches only a regular file of at most 20 MB, never through a link. Files elsewhere, such as your home at /opt/data or /tmp, are refused: write the file under /workspace first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string" },
+        paths: {
+          type: "array",
+          minItems: 1,
+          maxItems: SHARE_MAX_FILES,
+          items: { type: "string", description: "absolute path under /workspace/" },
+        },
+        bodyMd: { type: "string", description: "optional note posted with the files" },
+      },
+      required: ["taskId", "paths"],
+      additionalProperties: false,
+    },
+    run: ({ taskId, paths, bodyMd }) => {
+      const refused = sharePathProblems(paths);
+      if (refused.length) throw new Error(`share_to_task refused: ${refused.join("; ")}. Write the file under /workspace/ and share that path.`);
+      return apiAct({
+        type: "share_to_task",
+        task_id: taskId,
+        ...(typeof bodyMd === "string" && bodyMd.trim() ? { body_md: bodyMd } : {}),
+        files: paths.map((path) => ({ path })),
+      });
+    },
   },
   {
     name: "set_memory",

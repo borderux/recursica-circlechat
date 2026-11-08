@@ -65,6 +65,11 @@ runtime instructions):
   `conversationId`; use `post_message` to write into it.
 - `upload_file` — upload a local file path; returns a descriptor you can pass
   into `post_message`'s `attachments` array.
+- `share_to_task` — attach files you wrote under `/workspace` to a task, with
+  an optional note: `{ taskId, paths: ["/workspace/…"], bodyMd }`. It runs the
+  `share_to_task` action, so only a regular file under `/workspace` of at most
+  20 MB attaches, never through a link. A file in your home or `/tmp` is
+  refused: write it under `/workspace` first.
 
 Boards (every channel has one):
 
